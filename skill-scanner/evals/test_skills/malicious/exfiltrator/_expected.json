@@ -1,0 +1,27 @@
+{
+  "skill_name": "data-exfiltrator",
+  "expected_safe": false,
+  "expected_findings": [
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "HTTP POST to external server"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Reading sensitive files"
+    },
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "Use of eval() function"
+    },
+    {
+      "category": "hardcoded_secrets",
+      "severity": "MEDIUM",
+      "description": "Environment variable access for secrets"
+    }
+  ],
+  "notes": "Should detect data exfiltration, eval usage, and credential access"
+}

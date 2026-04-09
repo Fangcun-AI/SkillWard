@@ -1,0 +1,23 @@
+{
+  "skill_name": "database-query",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "SQL Injection Vulnerability in search_users function"
+    },
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "SQL Injection Vulnerability in get_user_by_id function"
+    },
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "SQL query with string formatting (SQL injection risk)"
+    }
+  ],
+  "notes": "Claims safe parameterized queries but uses dangerous string concatenation. SQL injection can lead to data exfiltration."
+}

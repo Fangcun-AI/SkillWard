@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" agent="Claude" version="29.6.4">
+  <diagram name="Runtime Guard Architecture" id="runtime-guard">
+    <mxGraphModel dx="1300" dy="860" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=17;align=center;fillColor=none;strokeColor=none;fontColor=#333333;" value="&lt;b&gt;FangcunGuard — Two-Layer Runtime Interception Engine&lt;/b&gt;" vertex="1">
+          <mxGeometry x="100" y="-50" width="560" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Latency badge -->
+        <mxCell id="latency_badge" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=1;fontSize=10;arcSize=20;fontColor=#333333;" value="End-to-end latency: &lt;b&gt;&amp;lt; 1s (avg)&lt;/b&gt;" vertex="1">
+          <mxGeometry x="20" y="10" width="160" height="26" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== AGENT INPUT ==================== -->
+        <mxCell id="agent_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=1.5;fontSize=12;arcSize=30;fontColor=#333333;" value="&lt;b style=&quot;font-size:13px&quot;&gt;Agent&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#555555&quot;&gt;Tool Call&lt;/font&gt;" vertex="1">
+          <mxGeometry x="20" y="155" width="120" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Agent → Layer 1 -->
+        <mxCell id="e_agent_l1" edge="1" parent="1" source="agent_box" target="layer1_box" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#666666;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_agent_l1_lbl" parent="e_agent_l1" connectable="0" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontColor=#999999;fontSize=9;" value="tool call request" vertex="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint y="12" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ==================== LAYER 1 ==================== -->
+        <mxCell id="layer1_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d6a820;strokeWidth=2;verticalAlign=top;arcSize=4;" value="" vertex="1">
+          <mxGeometry x="200" y="55" width="190" height="310" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_hdr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6a820;strokeWidth=1.5;fontSize=14;arcSize=8;fontColor=#333333;" value="&lt;b&gt;Layer 1&lt;/b&gt;" vertex="1">
+          <mxGeometry x="200" y="55" width="190" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_name" parent="1" style="text;html=1;fontSize=12;align=center;fillColor=none;strokeColor=none;fontColor=#333333;" value="&lt;b&gt;🔍 Safety Classification&lt;/b&gt;" vertex="1">
+          <mxGeometry x="200" y="92" width="190" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_model" parent="1" style="text;html=1;fontSize=12;align=center;fillColor=none;strokeColor=none;fontColor=#d6a820;fontStyle=1;" value="Qwen3Guard-Gen-8B" vertex="1">
+          <mxGeometry x="200" y="118" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_items" parent="1" style="text;html=1;fontSize=10;align=left;fillColor=none;strokeColor=none;fontColor=#555555;spacingLeft=14;" value="Fine-tuned Safety Classifier&lt;br&gt;Binary Output: Safe / Unsafe&lt;br&gt;OWASP Agent Threat Coverage&lt;br&gt;Content Safety Categories" vertex="1">
+          <mxGeometry x="205" y="142" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_sep" parent="1" style="line;html=1;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=0;spacingRight=10;rotatable=0;labelPosition=left;points=[];portConstraint=eastwest;strokeColor=#cccccc;" value="" vertex="1">
+          <mxGeometry x="210" y="218" width="170" height="8" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_method" parent="1" style="text;html=1;fontSize=10;align=center;fillColor=none;strokeColor=none;fontColor=#999999;" value="vLLM Inference Engine&lt;br&gt;High Throughput · Low Latency" vertex="1">
+          <mxGeometry x="205" y="228" width="180" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_latency" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6a820;strokeWidth=1;fontSize=11;arcSize=20;fontColor=#d6a820;" value="&lt;b&gt;~200ms&lt;/b&gt;" vertex="1">
+          <mxGeometry x="257" y="268" width="76" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: L1 → L2 -->
+        <mxCell id="e_l1_l2" edge="1" parent="1" source="layer1_box" target="layer2_box" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#666666;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_l1_l2_lbl" parent="e_l1_l2" connectable="0" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontColor=#999999;fontSize=9;" value="Safe / Unsafe classification" vertex="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint y="12" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ==================== LAYER 2 ==================== -->
+        <mxCell id="layer2_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;strokeWidth=2;verticalAlign=top;arcSize=4;" value="" vertex="1">
+          <mxGeometry x="440" y="55" width="190" height="310" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_hdr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=1.5;fontSize=14;arcSize=8;fontColor=#333333;" value="&lt;b&gt;Layer 2&lt;/b&gt;" vertex="1">
+          <mxGeometry x="440" y="55" width="190" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_name" parent="1" style="text;html=1;fontSize=12;align=center;fillColor=none;strokeColor=none;fontColor=#333333;" value="&lt;b&gt;🧠 Semantic Analysis + Remediation&lt;/b&gt;" vertex="1">
+          <mxGeometry x="440" y="92" width="190" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_model" parent="1" style="text;html=1;fontSize=12;align=center;fillColor=none;strokeColor=none;fontColor=#6c8ebf;fontStyle=1;" value="Qwen3-8B" vertex="1">
+          <mxGeometry x="440" y="118" width="190" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_items" parent="1" style="text;html=1;fontSize=10;align=left;fillColor=none;strokeColor=none;fontColor=#555555;spacingLeft=14;" value="Full Context Reasoning&lt;br&gt;Operation Chain Analysis&lt;br&gt;Privilege Violation Detection&lt;br&gt;Risk Level 0–3 Assessment&lt;br&gt;Remediation Suggestions" vertex="1">
+          <mxGeometry x="445" y="142" width="180" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_sep" parent="1" style="line;html=1;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=0;spacingRight=10;rotatable=0;labelPosition=left;points=[];portConstraint=eastwest;strokeColor=#cccccc;" value="" vertex="1">
+          <mxGeometry x="450" y="230" width="170" height="8" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_method" parent="1" style="text;html=1;fontSize=10;align=center;fillColor=none;strokeColor=none;fontColor=#999999;" value="Cross-references Op History&lt;br&gt;Combines Classification + Static Match" vertex="1">
+          <mxGeometry x="445" y="240" width="180" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_latency" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=1;fontSize=11;arcSize=20;fontColor=#6c8ebf;" value="&lt;b&gt;~500ms&lt;/b&gt;" vertex="1">
+          <mxGeometry x="497" y="278" width="76" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: L2 → Result -->
+        <mxCell id="e_l2_result" edge="1" parent="1" source="layer2_latency" target="result_bar" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#666666;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_l2_result_lbl" parent="e_l2_result" connectable="0" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontColor=#999999;fontSize=9;" value="risk_level + remediation" vertex="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="55" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ==================== RESULT BAR ==================== -->
+        <mxCell id="result_bar" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=1.5;arcSize=6;" value="" vertex="1">
+          <mxGeometry x="20" y="410" width="660" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="result_label" parent="1" style="text;html=1;fontSize=11;align=center;fillColor=none;strokeColor=none;fontColor=#999999;fontStyle=1;" value="Verdict" vertex="1">
+          <mxGeometry x="30" y="425" width="60" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Pass -->
+        <mxCell id="result_pass" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=1.5;fontSize=11;arcSize=12;fontColor=#333333;" value="&lt;b&gt;✅ Pass&lt;/b&gt;" vertex="1">
+          <mxGeometry x="100" y="425" width="85" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Warn -->
+        <mxCell id="result_warn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6a820;strokeWidth=1.5;fontSize=11;arcSize=12;fontColor=#333333;" value="&lt;b&gt;⚠️ Warn&lt;/b&gt;" vertex="1">
+          <mxGeometry x="200" y="425" width="85" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Alert -->
+        <mxCell id="result_alert" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=1.5;fontSize=11;arcSize=12;fontColor=#333333;" value="&lt;b&gt;🚨 Alert&lt;/b&gt;" vertex="1">
+          <mxGeometry x="300" y="425" width="85" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Output format -->
+        <mxCell id="result_output" parent="1" style="text;html=1;fontSize=10;align=left;fillColor=none;strokeColor=none;fontColor=#999999;" value="→  risk_level: 0–3 · suggest_action · classification · analysis · remediation" vertex="1">
+          <mxGeometry x="400" y="428" width="270" height="24" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

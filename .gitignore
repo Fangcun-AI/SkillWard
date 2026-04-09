@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.env
+data/
+pod-source/
+*.log
+.venv/
+venv/
+.DS_Store
+
+# Guardian UI
+guardian-ui/node_modules/
+guardian-ui/.next/
+
+# Guardian API
+guardian-api/output/
+
+# Skill Scanner
+skill-scanner/uv.lock
+skill-scanner/.cursor/
+skill-scanner/.windsurf/
+skill-scanner/.devin/
+skill-scanner/guardian-ui.zip
+skill-scanner/evals/skills/guardian-output-*/
+skill-scanner/fangcun_test_*.py

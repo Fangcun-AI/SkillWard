@@ -1,0 +1,58 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: detect-private-key
+        exclude: '(code_alignment_threat_analysis_prompt\.md|\.env\.example|_policy\.yaml|scan-policy\.md|evals/policies/|tests/test_new_detections\.py)'
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        exclude: '^\.env.*$'
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.31.3
+    hooks:
+      - id: check-github-workflows
+
+  - repo: https://github.com/google/addlicense
+    rev: v1.2.0
+    hooks:
+      - id: addlicense
+        args:
+          - -c
+          - "FangcunGuard"
+          - -l
+          - "apache"
+          - -s
+        files: \.(py|pyi)$
+
+  - repo: local
+    hooks:
+      - id: check-taxonomy
+        name: check-taxonomy
+        language: python
+        entry: python scripts/check_taxonomy.py
+        pass_filenames: false
+        files: \.(py|yaml)$
+        description: "Validate ThreatCategory enum against official FangcunGuard AI taxonomy"

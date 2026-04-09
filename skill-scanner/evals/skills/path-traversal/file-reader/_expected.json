@@ -1,0 +1,23 @@
+{
+  "skill_name": "safe-file-reader",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "Path Traversal Vulnerability in File Reading"
+    },
+    {
+      "category": "command_injection",
+      "severity": "CRITICAL",
+      "description": "Unsafe Configuration File Reading"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Accessing sensitive system or credential files"
+    }
+  ],
+  "notes": "Claims safe file reading but allows path traversal attacks. Multiple functions vulnerable to path traversal."
+}

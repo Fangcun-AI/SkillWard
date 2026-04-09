@@ -1,0 +1,229 @@
+# Copyright 2026 FangcunGuard
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Pattern matching utilities for security rules.
+"""
+
+import logging
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from ...core.models import Severity, ThreatCategory
+
+logger = logging.getLogger(__name__)
+
+# Matches a regex character class like [^\n] or [a-z0-9].
+# Used to strip character-class contents before checking whether a pattern
+# contains \n for genuine multiline spanning (vs single-line [^\n] anchoring).
+_CHAR_CLASS_RE = re.compile(r"\[[^\]]*\]")
+
+
+class SecurityRule:
+    """Represents a security detection rule."""
+
+    def __init__(self, rule_data: dict[str, Any]):
+        self.id = rule_data["id"]
+        self.category = ThreatCategory(rule_data["category"])
+        self.severity = Severity(rule_data["severity"])
+        self.patterns = rule_data["patterns"]
+        self.exclude_patterns = rule_data.get("exclude_patterns", [])
+        self.file_types = rule_data.get("file_types", [])
+        self.description = rule_data["description"]
+        self.remediation = rule_data.get("remediation", "")
+
+        # Compile regex patterns
+        self.compiled_patterns = []
+        for pattern in self.patterns:
+            try:
+                self.compiled_patterns.append(re.compile(pattern))
+            except re.error as e:
+                logger.warning("Failed to compile pattern '%s' for rule %s: %s", pattern, self.id, e)
+
+        # Compile exclude patterns
+        self.compiled_exclude_patterns = []
+        for pattern in self.exclude_patterns:
+            try:
+                self.compiled_exclude_patterns.append(re.compile(pattern))
+            except re.error as e:
+                logger.warning("Failed to compile exclude pattern '%s' for rule %s: %s", pattern, self.id, e)
+
+    def matches_file_type(self, file_type: str) -> bool:
+        """Check if this rule applies to the given file type."""
+        if not self.file_types:
+            return True  # Rule applies to all file types
+        return file_type in self.file_types
+
+    def scan_content(self, content: str, file_path: str | None = None) -> list[dict[str, Any]]:
+        """
+        Scan content for rule violations.
+
+        Returns:
+            List of matches with line numbers and snippets
+        """
+        matches = []
+        lines = content.split("\n")
+
+        for line_num, line in enumerate(lines, start=1):
+            # Check exclude patterns first
+            excluded = False
+            for exclude_pattern in self.compiled_exclude_patterns:
+                if exclude_pattern.search(line):
+                    excluded = True
+                    break
+
+            if excluded:
+                continue
+
+            for pattern in self.compiled_patterns:
+                match = pattern.search(line)
+                if match:
+                    matches.append(
+                        {
+                            "line_number": line_num,
+                            "line_content": line.strip(),
+                            "matched_pattern": pattern.pattern,
+                            "matched_text": match.group(0),
+                            "file_path": file_path,
+                        }
+                    )
+
+        # Some rules intentionally span lines (for example "...\\n...open(...)").
+        # The primary pass above is line-based for speed; this pass captures
+        # multiline-only regexes and maps matches back to starting line number.
+        for pattern in self.compiled_patterns:
+            # Check for \\n *outside* character classes.  Patterns that use
+            # [^\\n] (negated newline inside a character class) are still
+            # single-line patterns — they must NOT enter the multiline pass
+            # or they will duplicate every match already found in pass 1.
+            stripped = _CHAR_CLASS_RE.sub("", pattern.pattern)
+            if "\\n" not in stripped:
+                continue
+            for match in pattern.finditer(content):
+                matched_text = match.group(0)
+                excluded = False
+                for exclude_pattern in self.compiled_exclude_patterns:
+                    if exclude_pattern.search(matched_text):
+                        excluded = True
+                        break
+                if excluded:
+                    continue
+
+                start_line = content.count("\n", 0, match.start()) + 1
+                snippet = lines[start_line - 1].strip() if 0 <= start_line - 1 < len(lines) else ""
+                matches.append(
+                    {
+                        "line_number": start_line,
+                        "line_content": snippet,
+                        "matched_pattern": pattern.pattern,
+                        "matched_text": matched_text[:200],
+                        "file_path": file_path,
+                    }
+                )
+
+        return matches
+
+
+class RuleLoader:
+    """Loads security rules from YAML files."""
+
+    def __init__(self, rules_file: Path | None = None):
+        """
+        Initialize rule loader.
+
+        Args:
+            rules_file: Path to a single YAML file **or** a directory
+                containing multiple ``*.yaml`` category files.  If *None*,
+                defaults to the core pack's ``signatures/`` directory.
+        """
+        if rules_file is None:
+            from ...data import DATA_DIR
+
+            sigs_dir = DATA_DIR / "packs" / "core" / "signatures"
+            rules_file = sigs_dir
+
+        self.rules_file = rules_file
+        self.rules: list[SecurityRule] = []
+        self.rules_by_id: dict[str, SecurityRule] = {}
+        self.rules_by_category: dict[ThreatCategory, list[SecurityRule]] = {}
+
+    def load_rules(self) -> list[SecurityRule]:
+        """
+        Load rules from a YAML file or a directory of YAML files.
+
+        Returns:
+            List of SecurityRule objects
+        """
+        rules_path = Path(self.rules_file)
+        if rules_path.is_dir():
+            rules_data: list[dict] = []
+            yaml_files = sorted(rules_path.glob("*.yaml"))
+            if not yaml_files:
+                raise RuntimeError(f"No .yaml rule files found in {rules_path}")
+
+            for yaml_file in yaml_files:
+                try:
+                    with open(yaml_file, encoding="utf-8") as f:
+                        data = yaml.safe_load(f)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load rules from {yaml_file}: {e}") from e
+
+                if not isinstance(data, list):
+                    raise RuntimeError(f"Failed to load rules from {yaml_file}: expected a YAML list of rule objects")
+                rules_data.extend(data)
+        else:
+            try:
+                with open(rules_path, encoding="utf-8") as f:
+                    rules_data = yaml.safe_load(f)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load rules from {rules_path}: {e}")
+
+            if not isinstance(rules_data, list):
+                raise RuntimeError(f"Failed to load rules from {rules_path}: expected a YAML list of rule objects")
+
+        self.rules = []
+        self.rules_by_id = {}
+        self.rules_by_category = {}
+
+        for rule_data in rules_data:
+            try:
+                rule = SecurityRule(rule_data)
+                self.rules.append(rule)
+                self.rules_by_id[rule.id] = rule
+
+                # Group by category
+                if rule.category not in self.rules_by_category:
+                    self.rules_by_category[rule.category] = []
+                self.rules_by_category[rule.category].append(rule)
+            except Exception as e:
+                logger.warning("Failed to load rule %s: %s", rule_data.get("id", "unknown"), e)
+
+        return self.rules
+
+    def get_rule(self, rule_id: str) -> SecurityRule | None:
+        """Get a specific rule by ID."""
+        return self.rules_by_id.get(rule_id)
+
+    def get_rules_for_file_type(self, file_type: str) -> list[SecurityRule]:
+        """Get all rules that apply to a specific file type."""
+        return [rule for rule in self.rules if rule.matches_file_type(file_type)]
+
+    def get_rules_for_category(self, category: ThreatCategory) -> list[SecurityRule]:
+        """Get all rules in a specific threat category."""
+        return self.rules_by_category.get(category, [])
