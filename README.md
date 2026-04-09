@@ -118,7 +118,7 @@ We evaluated SkillWard on a real-world AI Agent Skills dataset containing Skills
 
 #### Stage A + B: Static Scan + LLM Evaluation
 
-Combining **YARA rules, regex-based static analysis, and LLM semantic evaluation**, all Skills are quickly triaged: safe ~49%, unsafe ~13%, suspicious ~38%, where suspicious Skills are escalated to Stage C for sandbox verification.
+Combining **YARA rules, regex-based static analysis, and LLM semantic evaluation**, all Skills are quickly triaged: Safe ~49%, Unsafe ~13%, Suspicious ~38%, where Suspicious Skills are escalated to Stage C for sandbox verification.
 
 #### Stage C: Sandbox Verification
 
@@ -133,13 +133,13 @@ Stage C verdict breakdown for these suspicious Skills:
 
 | Level | Meaning | % of suspicious |
 |---|---|---|
-| **safe** | Confirmed safe after sandbox verification | **~69%** |
-| **medium risk** | Medium-risk behavior (undeclared external requests, env-var harvesting, etc.) | **~17%** |
-| **high risk** | High-risk behavior (credential theft, persistence backdoors, remote code execution, etc.) | **~14%** |
+| **Safe** | Confirmed safe after sandbox verification | **~69%** |
+| **Medium Risk** | Medium-risk behavior (undeclared external requests, env-var harvesting, etc.) | **~17%** |
+| **High Risk** | High-risk behavior (credential theft, persistence backdoors, remote code execution, etc.) | **~14%** |
 
 #### Overall
 
-Across all stages: Stage A + B directly blocked ~**13%** unsafe Skills, and ~**38%** suspicious Skills entered the sandbox; among those suspicious Skills, ~**17%** were judged medium risk and ~**14%** were judged high risk.
+Across all stages: Stage A + B directly blocked ~**13%** Unsafe Skills, and ~**38%** Suspicious Skills entered the sandbox; among those Suspicious Skills, ~**17%** were judged Medium Risk and ~**14%** were judged High Risk.
 
 #### Common Threat Patterns (% of unsafe Skills)
 
