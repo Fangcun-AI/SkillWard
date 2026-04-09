@@ -1,0 +1,6 @@
+{
+  "skill_name": "simple-formatter",
+  "expected_safe": true,
+  "expected_findings": [],
+  "notes": "Clean skill with no security issues"
+}

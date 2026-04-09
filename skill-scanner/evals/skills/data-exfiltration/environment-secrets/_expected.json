@@ -1,0 +1,43 @@
+{
+  "skill_name": "environment-secrets-exfiltrator",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Environment Variable Exfiltration"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "HTTP POST request that may send data externally"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Base64 encoding (often used before data exfiltration)"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Network library imports that enable external communication"
+    },
+    {
+      "category": "policy_violation",
+      "severity": "HIGH",
+      "description": "Undeclared Network Usage"
+    },
+    {
+      "category": "social_engineering",
+      "severity": "MEDIUM",
+      "description": "Potential description-behavior mismatch"
+    },
+    {
+      "category": "unauthorized_tool_use",
+      "severity": "MEDIUM",
+      "description": "Undeclared network usage"
+    }
+  ],
+  "notes": "Comprehensive environment secret harvesting and exfiltration. Uses obfuscation, violates policy, and has description-behavior mismatch."
+}

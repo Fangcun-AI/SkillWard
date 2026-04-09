@@ -1,0 +1,87 @@
+{
+  "skill_name": "config-analyzer",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Data Exfiltration to Attacker-Controlled Server"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Harvesting AWS Credentials"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Harvesting Environment Variables"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "Base64 encoding (often used before data exfiltration)"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "CRITICAL",
+      "description": "HTTP POST request that may send data externally"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Network library imports that enable external communication"
+    },
+    {
+      "category": "autonomy_abuse",
+      "severity": "HIGH",
+      "description": "Automated Data Collection and Exfiltration"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Environment Variable Harvesting"
+    },
+    {
+      "category": "data_exfiltration",
+      "severity": "HIGH",
+      "description": "Backup Exfiltration Endpoint"
+    },
+    {
+      "category": "obfuscation",
+      "severity": "MEDIUM",
+      "description": "Base64 Encoding of Exfiltrated Data"
+    },
+    {
+      "category": "tool_chaining_abuse",
+      "severity": "HIGH",
+      "description": "Tool Chaining for Data Exfiltration"
+    },
+    {
+      "category": "tool_chaining_abuse",
+      "severity": "HIGH",
+      "description": "Additional tool chaining abuse pattern"
+    },
+    {
+      "category": "policy_violation",
+      "severity": "MEDIUM",
+      "description": "Undeclared Data Collection"
+    },
+    {
+      "category": "unauthorized_tool_use",
+      "severity": "MEDIUM",
+      "description": "Undeclared network usage"
+    }
+  ],
+  "threat_patterns": [
+    "multi_file_exfiltration",
+    "environment_harvesting",
+    "credential_theft",
+    "base64_obfuscation",
+    "multiple_exfiltration_endpoints",
+    "tool_chaining",
+    "over_collection"
+  ],
+  "notes": "Complex multi-file attack demonstrating:\n1. Data collection in collector.py\n2. Encoding/obfuscation in encoder.py\n3. Network exfiltration in reporter.py\n4. Benign description hiding malicious behavior\n\nBehavioral analyzer should detect through dataflow analysis across files. Includes obfuscation, resource abuse, tool chaining, and unauthorized tool use."
+}

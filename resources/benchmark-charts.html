@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fangcun-SkillsScanner — Batch Scan Report</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+    background: #f0ede6;
+    color: #222;
+    display: flex;
+    justify-content: center;
+    padding: 40px 32px;
+  }
+  .page {
+    background: #fff;
+    border-radius: 16px;
+    padding: 56px 64px 48px;
+    max-width: 1200px;
+    width: 100%;
+    box-shadow: 0 2px 24px rgba(0,0,0,0.06);
+  }
+  h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; margin-bottom: 3px; }
+  .meta { font-size: 12px; color: #aaa; margin-bottom: 32px; padding-bottom: 16px; border-bottom: 1px solid #eee; }
+
+  .summary-strip { display: flex; margin-bottom: 32px; }
+  .ss-item { flex: 1; text-align: center; padding: 12px 8px; position: relative; }
+  .ss-item:not(:last-child)::after { content: ''; position: absolute; right: 0; top: 18%; height: 64%; width: 1px; background: #e8e8e8; }
+  .ss-num { font-size: 36px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+  .ss-label { font-size: 11.5px; font-weight: 600; color: #999; margin-top: 8px; }
+
+  .divider { height: 1px; background: #eee; margin: 28px 0; }
+
+  .fig-label { font-size: 11px; font-weight: 700; color: #bbb; letter-spacing: 1px; margin-bottom: 4px; }
+  .fig-title { font-size: 16px; font-weight: 700; color: #333; margin-bottom: 16px; }
+
+  /* Flow diagram section — centered, full width */
+  .funnel-section { text-align: center; margin-bottom: 8px; }
+  .funnel-section .fig-label, .funnel-section .fig-title { text-align: left; }
+  canvas#funnelCanvas { display: block; margin: 0 auto; width: 100%; max-width: 1100px; }
+
+  /* Distribution section — appears after funnel */
+  .dist-section {
+    margin-top: 0;
+    opacity: 0;
+    transform: translateY(16px);
+    transition: all 0.8s cubic-bezier(0.22,0.61,0.36,1);
+  }
+  .dist-section.v { opacity: 1; transform: none; }
+
+  .dist-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; }
+
+  /* Proportion strip + lollipop */
+  .prop-strip { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin-bottom: 14px; }
+  .prop-seg { height: 100%; width: 0; transition: width 1.2s cubic-bezier(0.22,0.61,0.36,1); }
+  .legend-row { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 10px; }
+  .lg-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #777; }
+  .lg-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .lg-val { font-weight: 700; color: #444; }
+  .lp-row { display: flex; align-items: center; height: 32px; }
+  .lp-label { width: 72px; font-size: 12px; font-weight: 600; color: #666; text-align: right; padding-right: 12px; flex-shrink: 0; }
+  .lp-track { flex: 1; height: 32px; position: relative; display: flex; align-items: center; }
+  .lp-line { height: 3px; border-radius: 1.5px; width: 0; transition: width 1s cubic-bezier(0.22,0.61,0.36,1); position: absolute; left: 0; }
+  .lp-dot { width: 10px; height: 10px; border-radius: 50%; position: absolute; top: 50%; transform: translate(-50%,-50%); left: 0; opacity: 0; transition: left 1s cubic-bezier(0.22,0.61,0.36,1), opacity 0.3s ease; }
+  .lp-val { position: absolute; top: 50%; transform: translateY(-50%); left: 0; font-size: 11.5px; font-weight: 700; color: #444; white-space: nowrap; opacity: 0; transition: left 1s cubic-bezier(0.22,0.61,0.36,1), opacity 0.4s ease 0.6s; padding-left: 8px; }
+
+  /* Findings table */
+  .findings-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  .findings-table th { font-size: 11px; font-weight: 700; color: #bbb; letter-spacing: 0.5px; text-align: left; padding: 10px 14px; border-bottom: 2px solid #eee; }
+  .findings-table td { font-size: 13px; color: #444; padding: 11px 14px; border-bottom: 1px solid #f5f5f5; line-height: 1.5; }
+  .findings-table tr:last-child td { border-bottom: none; }
+  .ft-metric { font-weight: 800; font-size: 20px; letter-spacing: -0.5px; }
+  .ft-desc strong { color: #333; font-weight: 700; }
+
+  .tags-bar { text-align: center; font-size: 12px; color: #888; line-height: 2.2; padding-top: 16px; border-top: 1px solid #eee; }
+  .tag { display: inline-block; background: #fef2f2; color: #b91c1c; font-size: 11px; font-weight: 700; padding: 3px 12px; border-radius: 10px; margin: 0 3px; }
+
+  .fade { opacity: 0; transform: translateY(8px); transition: all 0.6s cubic-bezier(0.22,0.61,0.36,1); }
+  .fade.v { opacity: 1; transform: none; }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <div class="fade" id="f0">
+    <h1>Fangcun-SkillsScanner 批量扫描报告</h1>
+    <p class="meta">20,000+ 真实 AI Agent Skills · 2026-03-29 ~ 2026-03-30</p>
+  </div>
+
+  <div class="summary-strip fade" id="f1">
+    <div class="ss-item"><div class="ss-num" style="color:#6366c7">20,147</div><div class="ss-label">扫描总数</div></div>
+    <div class="ss-item"><div class="ss-num" style="color:#f59e0b">3,998</div><div class="ss-label">Alert 风险</div></div>
+    <div class="ss-item"><div class="ss-num" style="color:#ef4444">833</div><div class="ss-label">Blocked 阻断</div></div>
+    <div class="ss-item"><div class="ss-num" style="color:#22c55e">59.1%</div><div class="ss-label">智能跳过率</div></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- FUNNEL: centered, full width, animates first -->
+  <div class="funnel-section fade" id="f2">
+    <div class="fig-label">FIG. 1</div>
+    <div class="fig-title">三阶段检测流程</div>
+    <canvas id="funnelCanvas" width="2000" height="980"></canvas>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- DISTRIBUTION: appears after funnel animation completes -->
+  <div class="dist-section" id="distSection">
+    <div class="dist-grid">
+      <div>
+        <div class="fig-label">FIG. 2</div>
+        <div class="fig-title">整体判定分布</div>
+        <div class="prop-strip" id="propStrip1"></div>
+        <div class="legend-row" id="legend1"></div>
+        <div id="lollipop1" style="margin-top:4px"></div>
+      </div>
+      <div>
+        <div class="fig-label">关键发现</div>
+        <table class="findings-table">
+          <thead><tr><th style="width:90px">指标</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="ft-metric" style="color:#ef4444">58.7%</span></td><td class="ft-desc"><strong>沙箱风险检出率</strong> — 8,237 个进入沙箱的 Skill 中，4,831 个被标记为 Alert 或 Blocked</td></tr>
+            <tr><td><span class="ft-metric" style="color:#f5a623">3,998</span></td><td class="ft-desc"><strong>风险警告 (Alert)</strong> — 环境变量收集、可疑外联、权限提升等潜在风险行为</td></tr>
+            <tr><td><span class="ft-metric" style="color:#e06860">833</span></td><td class="ft-desc"><strong>高危阻断 (Blocked)</strong> — 反向 Shell、凭证窃取等严重威胁，直接拦截禁止执行</td></tr>
+            <tr><td><span class="ft-metric" style="color:#22c55e">59.1%</span></td><td class="ft-desc"><strong>智能跳过沙箱</strong> — 前置静态分析可判定安全的 Skill 直接跳过，节省 59% 沙箱算力</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider" style="margin-top:32px"></div>
+
+  <div class="tags-bar fade" id="f5">
+    沙箱精确发现了 <strong style="color:#ef4444">4,831</strong> 个风险 Skill（含 <strong style="color:#e06860">833</strong> 个高危阻断），包括
+    <span class="tag">凭证窃取</span>
+    <span class="tag">crontab 持久化后门</span>
+    <span class="tag">供应链注入</span>
+    <span class="tag">反向 Shell</span>
+    <span class="tag">环境变量收集</span>
+    等高级攻击
+  </div>
+</div>
+
+<script>
+function show(id, ms) { setTimeout(() => document.getElementById(id).classList.add('v'), ms); }
+function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+const T = 20147;
+const STATIC_SAFE = 11910;
+const SANDBOX_IN = 8237;
+const SB_SAFE = 3406;    // 沙箱确认安全 (2802 + 604)
+const SB_ALERT = 3998;   // 存在风险 Alert
+const SB_BLOCKED = 833;  // 高危阻断 Blocked
+
+// ── Distribution data (3 categories) ──
+// 安全 = 静态安全 11,910 + 沙箱安全 3,406 = 15,316
+// Alert = 4,000   Blocked = 831
+const segs1 = [
+  { l: '安全 (Safe)', v: 15316, c: '#6dd5a0' },
+  { l: '风险 (Alert)', v: 3998, c: '#f5c462' },
+  { l: '阻断 (Blocked)', v: 833, c: '#e86060' },
+];
+const total1 = T;
+
+function buildPropStrip(cId, lId, segs, total) {
+  const strip = document.getElementById(cId);
+  const legend = document.getElementById(lId);
+  segs.forEach(s => {
+    const seg = document.createElement('div');
+    seg.className = 'prop-seg'; seg.style.background = s.c;
+    seg.dataset.w = (s.v / total * 100).toFixed(1);
+    strip.appendChild(seg);
+    const item = document.createElement('div');
+    item.className = 'lg-item';
+    item.innerHTML = '<div class="lg-dot" style="background:'+s.c+'"></div>'+s.l+' <span class="lg-val">'+s.v.toLocaleString()+'</span>';
+    legend.appendChild(item);
+  });
+}
+buildPropStrip('propStrip1','legend1',segs1,total1);
+
+const lp1 = document.getElementById('lollipop1');
+const maxV1 = Math.max(...segs1.map(s=>s.v));
+segs1.forEach(s => {
+  const pct = (s.v/maxV1*80).toFixed(1);
+  const row = document.createElement('div'); row.className='lp-row';
+  row.innerHTML='<div class="lp-label">'+s.l+'</div><div class="lp-track">'+
+    '<div class="lp-line" style="background:'+s.c+'" data-w="'+pct+'"></div>'+
+    '<div class="lp-dot" style="background:'+s.c+'" data-l="'+pct+'"></div>'+
+    '<div class="lp-val" data-l="'+pct+'">'+s.v.toLocaleString()+' <span style="color:#aaa;font-weight:500">('+(s.v/total1*100).toFixed(1)+'%)</span></div></div>';
+  lp1.appendChild(row);
+});
+
+// ── Funnel Canvas ──
+const canvas = document.getElementById('funnelCanvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const stageColors = [
+  { grad1: '#e4e5fb', grad2: '#d0d1f7', grad3: '#bcbef2', main: '#9b9de8' },  // Phase 1 purple
+  { grad1: '#dbe9fd', grad2: '#bed8fb', grad3: '#a2c7f8', main: '#8bbdf8' },  // Phase 2 blue
+  { grad1: '#fce4e4', grad2: '#f5c8c8', grad3: '#edb0b0', main: '#e89494' },  // Phase 3 pink
+];
+
+let animP = 0, animStart = null;
+const ANIM_DUR = 2800;
+
+// Smooth rounded-rect path
+function rrPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+
+// Trapezoid path (top wider → bottom narrower, or same width for rectangle)
+function trapPath(cx, y, wTop, h, wBot) {
+  const r = 16;
+  const l1 = cx - wTop/2, r1 = cx + wTop/2;
+  const l2 = cx - wBot/2, r2 = cx + wBot/2;
+  const y2 = y + h;
+  ctx.beginPath();
+  ctx.moveTo(l1 + r, y);
+  ctx.lineTo(r1 - r, y);
+  ctx.quadraticCurveTo(r1, y, r1 - (wTop > wBot ? (r1-r2)*0.15 : 0), y + Math.min(r, h*0.3));
+  ctx.lineTo(r2, y2 - r);
+  ctx.quadraticCurveTo(r2, y2, r2 - r, y2);
+  ctx.lineTo(l2 + r, y2);
+  ctx.quadraticCurveTo(l2, y2, l2, y2 - r);
+  ctx.lineTo(l1 + (wTop > wBot ? (r1-r2)*0.15 : 0), y + Math.min(r, h*0.3));
+  ctx.quadraticCurveTo(l1, y, l1 + r, y);
+  ctx.closePath();
+}
+
+// Draw a filled stage band
+function drawBand(cx, y, wTop, h, wBot, sc, alpha) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // Shadow
+  ctx.shadowColor = 'rgba(0,0,0,0.06)';
+  ctx.shadowBlur = 24; ctx.shadowOffsetY = 6;
+  // Gradient fill
+  const grad = ctx.createLinearGradient(0, y, 0, y + h);
+  grad.addColorStop(0, sc.grad1);
+  grad.addColorStop(0.5, sc.grad2);
+  grad.addColorStop(1, sc.grad3);
+  ctx.fillStyle = grad;
+  trapPath(cx, y, wTop, h, wBot);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // Glass top highlight
+  ctx.save();
+  trapPath(cx, y, wTop, h, wBot);
+  ctx.clip();
+  const hl = ctx.createLinearGradient(cx - wTop/2, y, cx + wTop/2, y);
+  hl.addColorStop(0, 'rgba(255,255,255,0.35)');
+  hl.addColorStop(0.35, 'rgba(255,255,255,0.12)');
+  hl.addColorStop(0.65, 'rgba(255,255,255,0)');
+  hl.addColorStop(1, 'rgba(255,255,255,0.08)');
+  ctx.fillStyle = hl;
+  ctx.fillRect(cx - wTop/2, y, wTop, h * 0.4);
+  // Top edge bright line
+  const edge = ctx.createLinearGradient(0, y, 0, y + 5);
+  edge.addColorStop(0, 'rgba(255,255,255,0.55)');
+  edge.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = edge;
+  ctx.fillRect(cx - wTop/2, y, wTop, 5);
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawFunnel(p) {
+  ctx.clearRect(0, 0, W, H);
+
+  const cx = W / 2;   // center X
+  const topY = 30;
+  const fullW = 820;   // Phase 1 & 2 full width (same, no narrowing)
+  const p3W = 480;     // Phase 3 narrower width (sandbox subset)
+  const stageH = 190;  // height per stage
+  const transH = 70;   // transition/narrowing zone height
+
+  // Phase positions
+  const p1y = topY;
+  const p2y = p1y + stageH;
+  const trY = p2y + stageH;           // transition zone (narrowing)
+  const p3y = trY + transH;
+  const resY = p3y + stageH + 20;     // result bar
+
+  // ── Staggered animation progress ──
+  const ap = (start, dur) => easeOut(Math.min(1, Math.max(0, (p - start) / dur)));
+
+  const a1 = ap(0.00, 0.20);    // Phase 1
+  const a2 = ap(0.15, 0.20);    // Phase 2
+  const aTr = ap(0.30, 0.18);   // Transition narrowing
+  const aSafe = ap(0.38, 0.18); // Safe branch arrow
+  const a3 = ap(0.40, 0.22);    // Phase 3
+  const aRes = ap(0.65, 0.25);  // Results
+
+  // ════════ Phase 1 ════════
+  drawBand(cx, p1y, fullW * a1, stageH, fullW * a1, stageColors[0], a1);
+  if (a1 > 0.3) {
+    const ta = easeOut(Math.min(1, (a1 - 0.3) / 0.7));
+    ctx.save(); ctx.globalAlpha = ta;
+    ctx.textAlign = 'center';
+    ctx.font = '800 48px -apple-system, sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(0,0,0,0.12)'; ctx.shadowBlur = 3;
+    ctx.fillText(T.toLocaleString(), cx, p1y + stageH/2 + 6);
+    ctx.shadowBlur = 0;
+    ctx.font = '600 20px PingFang SC, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('Skills 全量扫描', cx, p1y + stageH/2 + 36);
+    // Left label
+    ctx.textAlign = 'right';
+    const lx = cx - fullW * a1 / 2 - 28;
+    ctx.font = '800 24px PingFang SC, sans-serif';
+    ctx.fillStyle = stageColors[0].main;
+    ctx.fillText('第一阶段', lx, p1y + stageH/2 - 6);
+    ctx.font = '500 16px PingFang SC, sans-serif';
+    ctx.fillStyle = '#999';
+    ctx.fillText('静态分析 · YARA · 规则引擎', lx, p1y + stageH/2 + 20);
+    ctx.restore();
+  }
+
+  // ════════ Phase 2 ════════
+  // Phase 2 same width as Phase 1 — no narrowing
+  drawBand(cx, p2y, fullW * a2, stageH, fullW * a2, stageColors[1], a2);
+  if (a2 > 0.3) {
+    const ta = easeOut(Math.min(1, (a2 - 0.3) / 0.7));
+    ctx.save(); ctx.globalAlpha = ta;
+    ctx.textAlign = 'center';
+    ctx.font = '800 48px -apple-system, sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(0,0,0,0.12)'; ctx.shadowBlur = 3;
+    ctx.fillText(T.toLocaleString(), cx, p2y + stageH/2 + 6);
+    ctx.shadowBlur = 0;
+    ctx.font = '600 20px PingFang SC, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('LLM 风险评分 0~1', cx, p2y + stageH/2 + 36);
+    // Left label
+    ctx.textAlign = 'right';
+    const lx = cx - fullW * a2 / 2 - 28;
+    ctx.font = '800 24px PingFang SC, sans-serif';
+    ctx.fillStyle = stageColors[1].main;
+    ctx.fillText('第二阶段', lx, p2y + stageH/2 - 6);
+    ctx.font = '500 16px PingFang SC, sans-serif';
+    ctx.fillStyle = '#999';
+    ctx.fillText('LLM 语义分析 · 意图理解', lx, p2y + stageH/2 + 20);
+    ctx.restore();
+  }
+
+  // ════════ Transition / Narrowing Zone ════════
+  // Trapezoid that narrows from fullW → p3W, showing safe skills branching off
+  if (aTr > 0) {
+    const curTop = fullW * aTr;
+    const curBot = p3W * aTr;
+    // Blended color for transition zone
+    const trSc = { grad1: '#e2e8f8', grad2: '#d4d8f0', grad3: '#ddd0e8', main: '#b0a8d0' };
+    drawBand(cx, trY, curTop, transH, curBot, trSc, aTr);
+
+    // Thin divider lines
+    ctx.save(); ctx.globalAlpha = aTr * 0.3;
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - curTop/2 + 20, trY);
+    ctx.lineTo(cx + curTop/2 - 20, trY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ════════ Safe branch arrow (right side) ════════
+  if (aSafe > 0) {
+    ctx.save(); ctx.globalAlpha = aSafe;
+    const arrY = trY + transH / 2;
+    const arrX1 = cx + fullW/2 * Math.min(1, aTr > 0 ? 1 : 0);
+    const arrX2 = cx + fullW/2 + 160;
+
+    // Curved arrow going right
+    ctx.strokeStyle = '#6dd5a0';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + fullW * aTr / 2 - 10, arrY);
+    ctx.bezierCurveTo(cx + fullW/2 + 40, arrY, cx + fullW/2 + 60, arrY - 10, arrX2 - 10, arrY - 10);
+    ctx.stroke();
+    // Arrowhead
+    ctx.fillStyle = '#6dd5a0';
+    ctx.beginPath();
+    ctx.moveTo(arrX2 - 16, arrY - 18);
+    ctx.lineTo(arrX2, arrY - 10);
+    ctx.lineTo(arrX2 - 16, arrY - 2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Safe count + label
+    ctx.textAlign = 'left';
+    ctx.font = '800 34px -apple-system, sans-serif';
+    ctx.fillStyle = '#22c55e';
+    ctx.fillText(STATIC_SAFE.toLocaleString(), arrX2 + 14, arrY - 16);
+    ctx.font = '600 18px PingFang SC, sans-serif';
+    ctx.fillStyle = '#888';
+    ctx.fillText('置信安全 · 跳过沙箱 (59.1%)', arrX2 + 14, arrY + 14);
+    ctx.restore();
+  }
+
+  // ════════ Phase 3: Sandbox ════════
+  drawBand(cx, p3y, p3W * a3, stageH, p3W * a3, stageColors[2], a3);
+  if (a3 > 0.3) {
+    const ta = easeOut(Math.min(1, (a3 - 0.3) / 0.7));
+    ctx.save(); ctx.globalAlpha = ta;
+    ctx.textAlign = 'center';
+    ctx.font = '800 48px -apple-system, sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(0,0,0,0.12)'; ctx.shadowBlur = 3;
+    ctx.fillText(SANDBOX_IN.toLocaleString(), cx, p3y + stageH/2 - 6);
+    ctx.shadowBlur = 0;
+    ctx.font = '600 18px PingFang SC, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('Docker 沙箱动态执行', cx, p3y + stageH/2 + 24);
+    ctx.font = '500 14px PingFang SC, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillText('FangcunGuard 三层运行时引擎 · 行为监控 · <1ms 拦截', cx, p3y + stageH/2 + 48);
+    // Left label
+    ctx.textAlign = 'right';
+    const lx = cx - p3W * a3 / 2 - 28;
+    ctx.font = '800 24px PingFang SC, sans-serif';
+    ctx.fillStyle = stageColors[2].main;
+    ctx.fillText('第三阶段', lx, p3y + stageH/2 - 6);
+    ctx.font = '500 16px PingFang SC, sans-serif';
+    ctx.fillStyle = '#999';
+    ctx.fillText('沙箱执行 · 行为检测', lx, p3y + stageH/2 + 20);
+    ctx.restore();
+  }
+
+  // ════════ Result bar ════════
+  if (aRes > 0) {
+    const barW = p3W * aRes;
+    const barH = 52;
+    const bx = cx - barW/2;
+    const by = resY;
+
+    const results = [
+      { l: '安全通过', v: SB_SAFE,    c1: '#98e4c0', c2: '#70d8a4', tc: '#fff' },
+      { l: 'Alert',   v: SB_ALERT,   c1: '#fbd87a', c2: '#f5c44e', tc: '#fff' },
+      { l: 'Blocked', v: SB_BLOCKED, c1: '#f0908a', c2: '#e06860', tc: '#fff' },
+    ];
+
+    let ox = bx;
+    results.forEach((r, idx) => {
+      const segW = (r.v / SANDBOX_IN) * barW;
+      const grad = ctx.createLinearGradient(0, by, 0, by + barH);
+      grad.addColorStop(0, r.c1); grad.addColorStop(1, r.c2);
+      ctx.save(); ctx.globalAlpha = aRes;
+      ctx.fillStyle = grad;
+      if (idx === 0) {
+        rrPath(ox, by, segW, barH, 10);
+        // only round left corners
+        ctx.beginPath();
+        ctx.moveTo(ox+10, by); ctx.lineTo(ox+segW, by); ctx.lineTo(ox+segW, by+barH);
+        ctx.lineTo(ox+10, by+barH); ctx.quadraticCurveTo(ox, by+barH, ox, by+barH-10);
+        ctx.lineTo(ox, by+10); ctx.quadraticCurveTo(ox, by, ox+10, by); ctx.closePath();
+        ctx.fill();
+      } else if (idx === results.length - 1) {
+        ctx.beginPath();
+        ctx.moveTo(ox, by); ctx.lineTo(ox+segW-10, by); ctx.quadraticCurveTo(ox+segW, by, ox+segW, by+10);
+        ctx.lineTo(ox+segW, by+barH-10); ctx.quadraticCurveTo(ox+segW, by+barH, ox+segW-10, by+barH);
+        ctx.lineTo(ox, by+barH); ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.fillRect(ox, by, segW, barH);
+      }
+      // Label inside bar
+      if (segW > 90) {
+        ctx.textAlign = 'center';
+        ctx.font = '700 16px -apple-system, sans-serif';
+        ctx.fillStyle = r.tc || '#fff';
+        ctx.fillText(r.l + ' ' + r.v.toLocaleString(), ox + segW/2, by + barH/2 + 6);
+      }
+      ctx.restore();
+      ox += segW;
+    });
+
+    // Legend below
+    const ly = by + barH + 24;
+    ctx.save(); ctx.globalAlpha = aRes;
+    ctx.textAlign = 'left';
+    let lx = bx;
+    results.forEach(r => {
+      ctx.fillStyle = r.c1;
+      rrPath(lx, ly - 7, 13, 13, 3); ctx.fill();
+      ctx.font = '600 16px PingFang SC, sans-serif';
+      ctx.fillStyle = '#666';
+      ctx.fillText(r.l + '  ' + r.v.toLocaleString() + ' (' + (r.v/SANDBOX_IN*100).toFixed(1) + '%)', lx + 20, ly + 6);
+      lx += 220;
+    });
+    ctx.restore();
+  }
+}
+
+function roundRectFill(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath(); ctx.fill();
+}
+
+let distShown = false;
+function animateFunnel(ts) {
+  if (!animStart) animStart = ts;
+  const elapsed = ts - animStart;
+  animP = Math.min(1, elapsed / ANIM_DUR);
+  drawFunnel(animP);
+
+  if (animP < 1) {
+    requestAnimationFrame(animateFunnel);
+  } else if (!distShown) {
+    distShown = true;
+    showDistribution();
+  }
+}
+
+function showDistribution() {
+  const dist = document.getElementById('distSection');
+  dist.classList.add('v');
+  setTimeout(animateLeft, 300);
+  show('f5', 1200);
+}
+
+function animateLeft() {
+  document.querySelectorAll('.prop-seg[data-w]').forEach(el => { el.style.width = el.dataset.w + '%'; });
+  document.querySelectorAll('.lp-line[data-w]').forEach(el => { el.style.width = el.dataset.w + '%'; });
+  document.querySelectorAll('.lp-dot[data-l]').forEach(el => { el.style.left = el.dataset.l + '%'; el.style.opacity = '1'; });
+  document.querySelectorAll('.lp-val[data-l]').forEach(el => { el.style.left = el.dataset.l + '%'; el.style.opacity = '1'; });
+}
+
+// ── Animation sequence ──
+show('f0', 50);
+show('f1', 200);
+show('f2', 500);
+setTimeout(() => requestAnimationFrame(animateFunnel), 800);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="98" height="20" viewBox="0 0 98 20" role="img" aria-label="Fangcun AI badge">
+  <defs>
+    <linearGradient id="sw-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f3f3f3"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M3 0h92a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H3a3 3 0 0 1-3-3V3a3 3 0 0 1 3-3z" fill="#6B5B95"/>
+  <path d="M3 0h20v20H3a3 3 0 0 1-3-3V3a3 3 0 0 1 3-3z" fill="#555555"/>
+  <rect x="22" y="0" width="1" height="20" fill="#4b4b4b"/>
+
+  <g transform="translate(4.2 3.2)">
+    <path d="M8.1 1.8a5.3 5.3 0 0 1 5.3 5.3H10.5a2.4 2.4 0 0 0-2.4-2.4A2.4 2.4 0 0 0 5.7 7H2.8a5.3 5.3 0 0 1 5.3-5.2z" fill="#ffffff"/>
+    <rect x="5.6" y="6.1" width="3.2" height="3.2" rx="0.5" fill="#ffffff"/>
+    <rect x="8.8" y="9.3" width="3.6" height="3.6" rx="0.5" fill="#ffffff"/>
+  </g>
+
+  <text x="57" y="14" fill="#ffffff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10.5" text-anchor="middle">
+    Fangcun AI
+  </text>
+</svg>

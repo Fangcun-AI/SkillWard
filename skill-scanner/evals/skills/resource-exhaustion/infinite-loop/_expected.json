@@ -1,0 +1,28 @@
+{
+  "skill_name": "data-analyzer",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "resource_abuse",
+      "severity": "CRITICAL",
+      "description": "Resource Exhaustion Vulnerability - Infinite Loop without exit condition"
+    },
+    {
+      "category": "resource_abuse",
+      "severity": "CRITICAL",
+      "description": "Resource Exhaustion Vulnerability - Memory Bomb creating 10M item lists"
+    },
+    {
+      "category": "resource_abuse",
+      "severity": "HIGH",
+      "description": "Infinite loop without clear exit condition"
+    },
+    {
+      "category": "resource_abuse",
+      "severity": "HIGH",
+      "description": "Very large memory allocation - unbounded growth"
+    }
+  ],
+  "notes": "Resource exhaustion through infinite loop and memory bomb. Both CRITICAL and HIGH severity findings are legitimate."
+}

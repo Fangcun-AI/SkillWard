@@ -1,0 +1,48 @@
+{
+  "skill_name": "jailbreak-override",
+  "expected_safe": false,
+  "expected_severity": "CRITICAL",
+  "expected_findings": [
+    {
+      "category": "prompt_injection",
+      "severity": "HIGH",
+      "description": "Attempts to override system instructions"
+    },
+    {
+      "category": "prompt_injection",
+      "severity": "CRITICAL",
+      "description": "PROMPT INJECTION detected by YARA - multiple override patterns"
+    },
+    {
+      "category": "prompt_injection",
+      "severity": "CRITICAL",
+      "description": "PROMPT INJECTION detected by YARA - additional override pattern"
+    },
+    {
+      "category": "prompt_injection",
+      "severity": "CRITICAL",
+      "description": "PROMPT INJECTION detected by YARA - third override pattern"
+    },
+    {
+      "category": "policy_violation",
+      "severity": "HIGH",
+      "description": "Direct Policy Violation Request - instructs to disregard content policy"
+    },
+    {
+      "category": "obfuscation",
+      "severity": "MEDIUM",
+      "description": "Concealment Directive"
+    },
+    {
+      "category": "prompt_injection",
+      "severity": "MEDIUM",
+      "description": "System Prompt Extraction Attempt"
+    },
+    {
+      "category": "skill_discovery_abuse",
+      "severity": "MEDIUM",
+      "description": "Skill discovery abuse pattern detected"
+    }
+  ],
+  "notes": "Classic jailbreak attempt with multiple prompt injection patterns, policy violations, and concealment directives"
+}

@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+            "description": "Severity level of the security finding"
+          },
+          "aitech": {
+            "type": "string",
+            "enum": [
+              "AITech-1.1",
+              "AITech-1.2",
+              "AITech-4.3",
+              "AITech-8.2",
+              "AITech-9.1",
+              "AITech-9.2",
+              "AITech-12.1",
+              "AITech-13.1",
+              "AITech-15.1"
+            ],
+            "description": "AITech taxonomy code (REQUIRED). Choose based on threat type: AITech-1.1=Direct Prompt Injection (jailbreak, instruction override in SKILL.md), AITech-1.2=Indirect Prompt Injection - Instruction Manipulation (embedding malicious instructions in external data sources), AITech-4.3=Protocol Manipulation - Capability Inflation (skill discovery abuse, keyword baiting, over-broad capability claims), AITech-8.2=Data Exfiltration/Exposure (unauthorized data access, credential theft, hardcoded secrets), AITech-9.1=Model/Agentic System Manipulation (command injection, code injection, SQL injection), AITech-9.2=Detection Evasion (obfuscation vulnerabilities, hidden payloads), AITech-12.1=Tool Exploitation (tool poisoning, tool shadowing, unauthorized tool use), AITech-13.1=Disruption of Availability (resource abuse, DoS, infinite loops), AITech-15.1=Harmful/Misleading Content (deceptive content, misinformation)"
+          },
+          "aisubtech": {
+            "type": ["string", "null"],
+            "description": "Optional AISubtech taxonomy code (e.g., AISubtech-1.1.1)"
+          },
+          "title": {
+            "type": "string",
+            "description": "Brief title describing the security finding"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description of the security threat"
+          },
+          "location": {
+            "type": ["string", "null"],
+            "description": "File location where threat was found (format: filename:line_number or filename)"
+          },
+          "evidence": {
+            "type": ["string", "null"],
+            "description": "Code snippet or evidence showing the threat"
+          },
+          "remediation": {
+            "type": ["string", "null"],
+            "description": "Recommended remediation steps"
+          }
+        },
+        "required": ["severity", "aitech", "aisubtech", "title", "description", "location", "evidence", "remediation"],
+        "additionalProperties": false
+      }
+    },
+    "overall_assessment": {
+      "type": "string",
+      "description": "Summary assessment of the skill's security posture"
+    },
+    "primary_threats": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of primary threat types identified (empty if safe)"
+    }
+  },
+  "required": ["findings", "overall_assessment", "primary_threats"],
+  "additionalProperties": false
+}

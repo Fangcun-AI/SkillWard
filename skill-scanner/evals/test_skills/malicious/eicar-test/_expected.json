@@ -1,0 +1,13 @@
+{
+  "skill_name": "eicar-test",
+  "is_malicious": true,
+  "expected_findings": [
+    {
+      "category": "malware",
+      "severity": "CRITICAL",
+      "rule_id": "VIRUSTOTAL_MALICIOUS_FILE",
+      "description": "EICAR test file should be detected as malware"
+    }
+  ],
+  "notes": "Contains EICAR standard antivirus test file in assets/ folder. Should be detected by VirusTotal as malicious."
+}
