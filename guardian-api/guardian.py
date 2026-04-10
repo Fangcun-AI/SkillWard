@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-Skill Guardian: Two-Stage Static+LLM Analysis + Docker Runtime Verification
+SkillWard: Three-Stage Skill Security Scanner
 ============================================================================
 
-Stage 1 (Pre-scan): Static analysis + Conditional LLM deep analysis
-  - Run skill-scanner static analysis (regex, YARA, behavioral) on all skills
-  - LLM safety confidence scoring (via litellm, supports any provider)
-  - Skills judged SAFE are copied to safe-skills/ for Stage 2
+Stage A (Static Analysis): Fast pattern-based scanning
+  - YARA rules and regex scan for known malicious patterns
+  - Permission and capability consistency checks
+  - Hidden files, encoding obfuscation, prompt poisoning detection
 
-Stage 2 (Runtime Verification): Docker-based two-phase detection on SAFE skills
-  - Phase 1 (Guardian disabled): Agent prepares environment
-  - Phase 2 (Guardian enabled): Agent executes skill's primary function
-  - Capability-level analysis on FangcunGuard tool call logs
+Stage B (LLM Analysis): Semantic reasoning for intent and confidence scoring
+  - LLM safety confidence scoring (via litellm, supports any provider)
+  - High-confidence skills are classified directly
+  - Uncertain skills are forwarded to Stage C for sandbox verification
+
+Stage C (Sandbox Verification): Docker-based runtime detection on uncertain skills
+  - Phase 1 (Guard disabled): Agent prepares environment (install deps, create files)
+  - Phase 2 (Guard enabled): Agent executes skill's primary function with Guard monitoring
+  - Runtime Guard monitors for exfiltration, suspicious network access, credential theft
 
 Usage:
     python guardian.py -i <skills_dir>                        # Full pipeline
-    python guardian.py -i <skills_dir> --stage pre-scan       # Only static+LLM
-    python guardian.py -i <skills_dir> --stage runtime        # Only Docker (safe skills)
+    python guardian.py -i <skills_dir> --stage pre-scan       # Only Stage A+B
+    python guardian.py -i <skills_dir> --stage runtime        # Only Stage C (sandbox)
     python guardian.py -i <skills_dir> -n 5                   # Test first 5 skills
     python guardian.py -i <skills_dir> -s mcp,pdf             # Test specific skills
     python guardian.py -i <skills_dir> --parallel 3           # Parallel Docker runs
@@ -89,7 +94,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ══════════════════════════════════════════════════════════════════════
-# ── Stage 1: Static + Conditional LLM Analysis
+# ── Stage A+B: Static Analysis + LLM Analysis
 # ══════════════════════════════════════════════════════════════════════
 
 _SEVERITY_RANK = {
@@ -321,7 +326,7 @@ def run_llm_triage(skill_path, static_findings):
 def run_prescan(skills_dir, llm_threshold="MEDIUM", workers=4,
                 selected_skills=None, max_count=None,
                 safety_threshold=0.3, sandbox_threshold=None, output_dir=None):
-    """Run Stage 1: Static analysis + LLM safety confidence scoring."""
+    """Run Stage A+B: Static analysis + LLM safety confidence scoring."""
     import shutil
 
     settings = get_settings()
@@ -381,7 +386,7 @@ def run_prescan(skills_dir, llm_threshold="MEDIUM", workers=4,
             "llm_reason_en": triage.get("reason_en", ""),
         }
 
-    # Copy gray-zone skills to output dir for Stage 2
+    # Copy gray-zone skills to output dir for Stage C
     if output_dir:
         safe_dir = os.path.join(output_dir, "safe-skills")
         os.makedirs(safe_dir, exist_ok=True)
@@ -396,7 +401,7 @@ def run_prescan(skills_dir, llm_threshold="MEDIUM", workers=4,
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ── Stage 2: Docker Runtime Verification
+# ── Stage C: Sandbox Verification
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -963,7 +968,7 @@ fi
 def run_runtime_tests(skills_dir, output_dir, parallel=1, enable_after_tool=False,
                       image=None, phase1_timeout=None, phase2_timeout=None,
                       max_retries=None, retry_delay=None):
-    """Run Stage 2: Docker runtime tests on skills that passed Stage 1."""
+    """Run Stage C: Docker sandbox verification on skills that passed Stage A+B."""
     settings = get_settings()
     image = image or settings.docker_image
     timeout = phase2_timeout if phase2_timeout is not None else settings.phase2_timeout
@@ -1027,7 +1032,7 @@ def run_runtime_tests(skills_dir, output_dir, parallel=1, enable_after_tool=Fals
 
 
 def cross_compare(prescan_results, runtime_results):
-    """Cross-compare Stage 1 and Stage 2 results to find false negatives."""
+    """Cross-compare Stage A+B and Stage C results to find false negatives."""
     comparisons = []
     for skill_name, runtime in runtime_results.items():
         prescan = prescan_results.get(skill_name, {})
@@ -1062,16 +1067,16 @@ def main():
                              "When off, FANGCUN_DISABLE_AFTER_TOOL=1 is injected into the container.")
 
     parser.add_argument("--safety-threshold", type=float, default=0.3,
-                        help="Stage 1 LLM safety confidence lower bound (< this → UNSAFE)")
+                        help="Stage B LLM safety confidence lower bound (< this → UNSAFE)")
     parser.add_argument("--sandbox-threshold", type=float, default=None,
-                        help="Stage 1 LLM safety confidence upper bound. "
+                        help="Stage B LLM safety confidence upper bound. "
                              "Skills with conf in [safety_threshold, sandbox_threshold) "
-                             "enter the Docker sandbox; conf ≥ sandbox_threshold are "
+                             "enter the Stage C sandbox; conf ≥ sandbox_threshold are "
                              "accepted directly. Defaults to settings.sandbox_threshold (0.9).")
 
     # ── Sandbox defaults (previously env vars; override here if needed) ──
     parser.add_argument("--image", default="fangcunai/skillward:amd64",
-                        help="Docker image used by Stage 2 sandbox")
+                        help="Docker image used by Stage C sandbox")
     parser.add_argument("--phase1-timeout", type=int, default=300,
                         help="Phase 1 (env prep) timeout in seconds")
     parser.add_argument("--phase2-timeout", type=int, default=300,
