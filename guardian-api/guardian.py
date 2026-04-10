@@ -664,6 +664,17 @@ for _df in /opt/openclaw/dist/pi-embedded-*.js /opt/openclaw/dist/reply-*.js /op
     [ -f "$_df" ] && sed -i 's/const elevatedDefaults = defaults?.elevated;/const elevatedDefaults = defaults?.elevated || {{enabled:true,allowed:true,defaultLevel:"on"}};/' "$_df"
 done
 
+# ── Start Gateway daemon (required for exec tool approval RPC) ──
+node /opt/openclaw/openclaw.mjs gateway --allow-unconfigured &
+GATEWAY_PID=$!
+for _i in $(seq 1 10); do
+    if ss -tlnp 2>/dev/null | grep -q ':18789 ' || netstat -tlnp 2>/dev/null | grep -q ':18789 '; then
+        echo "[guardian] Gateway daemon ready on :18789"
+        break
+    fi
+    sleep 1
+done
+
 # ── Phase 1: Disable Guardian, prepare environment ──
 echo "===PHASE1_START==="
 mv /root/.openclaw/extensions/openclaw-fangcun-guard \
@@ -725,6 +736,12 @@ while [ $ATTEMPT -le $MAX_RETRIES ]; do
         break
     fi
 done
+
+# ── Cleanup: stop Gateway daemon ──
+if [ -n "$GATEWAY_PID" ]; then
+    kill $GATEWAY_PID 2>/dev/null
+    wait $GATEWAY_PID 2>/dev/null
+fi
 """
 
     container_ts = int(time.time())
