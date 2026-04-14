@@ -1,28 +1,10 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-Context-aware command safety evaluation.
+Tiered shell command risk assessment.
 
-Replaces the flat SAFE_COMMANDS whitelist with a tiered evaluation system
-that considers:
-  - Command identity (what program is being run)
-  - Arguments (what flags and targets)
-  - Pipeline context (chained commands, redirections)
-  - Environment (variable manipulation, subshells)
+Analyzes shell command strings by breaking them into structural components
+(the program being invoked, its flags, downstream pipeline stages,
+redirections, background execution, and sub-shell expansions) and assigns
+a graduated risk level from SAFE through DANGEROUS.
 """
 
 import logging
@@ -31,259 +13,130 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import NamedTuple
 
-logger = logging.getLogger(__name__)
-_MAX_PATTERN_LENGTH = 1000
+_log = logging.getLogger(__name__)
+_REGEX_LEN_CAP = 1000
 
 
-def _safe_compile(pattern: str, flags: int = 0, *, max_length: int = _MAX_PATTERN_LENGTH) -> re.Pattern | None:
-    if len(pattern) > max_length:
-        logger.warning("Regex pattern too long (%d chars), skipping: %.60s...", len(pattern), pattern)
+def _try_compile(pattern: str, flags: int = 0, *, limit: int = _REGEX_LEN_CAP) -> re.Pattern | None:
+    """Attempt to compile *pattern*; return ``None`` on failure or excessive length."""
+    if len(pattern) > limit:
+        _log.warning("Pattern exceeds %d chars (%d), ignored: %.60s...", limit, len(pattern), pattern)
         return None
     try:
         return re.compile(pattern, flags)
-    except re.error as e:
-        logger.warning("Invalid regex pattern %r: %s", pattern, e)
+    except re.error as exc:
+        _log.warning("Bad regex %r: %s", pattern, exc)
         return None
 
 
-class CommandRisk(Enum):
-    """Risk classification for commands."""
+# ---- risk levels --------------------------------------------------------- #
 
-    SAFE = "safe"  # Purely informational, no side effects
-    CAUTION = "caution"  # Generally safe but context-dependent
-    RISKY = "risky"  # Can modify system or exfiltrate data
-    DANGEROUS = "dangerous"  # Direct system modification or remote execution
+class CommandRisk(Enum):
+    """Graduated threat level for an individual command invocation."""
+
+    SAFE = "safe"           # read-only / purely informational
+    CAUTION = "caution"     # benign in most contexts, risky in some
+    RISKY = "risky"         # may alter the host or leak data
+    DANGEROUS = "dangerous" # direct code-exec / network exfiltration
 
 
 class CommandVerdict(NamedTuple):
-    """Result of evaluating a command's safety."""
+    """Outcome of a single command assessment."""
 
     risk: CommandRisk
     reason: str
-    should_suppress_yara: bool  # Whether to suppress YARA code_execution findings
+    should_suppress_yara: bool  # hint: suppress YARA code_execution matches
 
 
-# --------------------------------------------------------------------------- #
-# Command classification tables
-# --------------------------------------------------------------------------- #
+# ---- command tier tables ------------------------------------------------- #
 
-# Tier 1: Safe commands - read-only, informational, no side effects
-_SAFE_COMMANDS = frozenset(
-    {
-        # Text/file inspection
-        "cat",
-        "head",
-        "tail",
-        "wc",
-        "file",
-        "stat",
-        "ls",
-        "dir",
-        "tree",
-        # Search
-        "grep",
-        "rg",
-        "ag",
-        "ack",
-        "fd",
-        "locate",
-        "which",
-        "where",
-        "whereis",
-        "type",
-        # Text processing (read-only)
-        "sort",
-        "uniq",
-        "cut",
-        "tr",
-        "fold",
-        "column",
-        "paste",
-        "join",
-        "diff",
-        "comm",
-        "fmt",
-        "nl",
-        "expand",
-        "unexpand",
-        # Info
-        "echo",
-        "printf",
-        "true",
-        "false",
-        "date",
-        "cal",
-        "uname",
-        "hostname",
-        "whoami",
-        "id",
-        "groups",
-        "env",
-        "printenv",
-        "pwd",
-        "basename",
-        "dirname",
-        "realpath",
-        "readlink",
-        # Hashing / checksums
-        "sha256sum",
-        "sha512sum",
-        "md5sum",
-        "shasum",
-        "cksum",
-        "b2sum",
-        # Programming tools (kept in SAFE – dangerous invocations caught by arg patterns)
-        "python",
-        "python3",
-        "node",
-        "ruby",
-    }
-)
+# Tier-1 -- purely read-only or informational programs
+_BENIGN_BINS = frozenset({
+    # file / directory inspection
+    "cat", "head", "tail", "wc", "file", "stat", "ls", "dir", "tree",
+    # searching
+    "grep", "rg", "ag", "ack", "fd", "locate", "which", "where",
+    "whereis", "type",
+    # text transforms (non-destructive)
+    "sort", "uniq", "cut", "tr", "fold", "column", "paste", "join",
+    "diff", "comm", "fmt", "nl", "expand", "unexpand",
+    # informational builtins
+    "echo", "printf", "true", "false", "date", "cal", "uname",
+    "hostname", "whoami", "id", "groups", "env", "printenv", "pwd",
+    "basename", "dirname", "realpath", "readlink",
+    # checksums
+    "sha256sum", "sha512sum", "md5sum", "shasum", "cksum", "b2sum",
+    # language runtimes (dangerous usage caught by arg-pattern rules)
+    "python", "python3", "node", "ruby",
+})
 
-# Tier 2: Caution commands - generally safe but can be misused with certain args
-_CAUTION_COMMANDS = frozenset(
-    {
-        # File manipulation
-        "cp",
-        "mv",
-        "ln",
-        "mkdir",
-        "rmdir",
-        "touch",
-        # Permissions
-        "chmod",
-        "chown",
-        "chgrp",
-        # Editors (usually safe in non-interactive)
-        "sed",
-        "awk",
-        "gawk",
-        "perl",
-        # Build tools
-        "make",
-        "cmake",
-        "gradle",
-        "mvn",
-        "dotnet",
-        "rustc",
-        # Package managers (can install things)
-        "apt",
-        "apt-get",
-        "brew",
-        "yum",
-        "dnf",
-        "pacman",
-        "apk",
-        "yarn",
-        "pnpm",
-        # GTFOBins-capable: safe in common use but can spawn shells / execute code
-        "find",  # -exec, -execdir can run arbitrary commands
-        "less",  # !command shell escape
-        "more",  # !command shell escape
-        "git",  # arbitrary code via hooks, subcommands
-        "npm",  # run/exec can execute arbitrary code
-        "pip",  # install can run setup.py
-        "pip3",  # install can run setup.py
-        "uv",  # run can execute arbitrary code
-        "cargo",  # run/build can execute build scripts
-        "go",  # run/generate can execute arbitrary code
-        "java",  # executes bytecode
-        "javac",  # compiler, can trigger annotation processors
-    }
-)
+# Tier-2 -- usually harmless but context-dependent
+_MODERATE_BINS = frozenset({
+    # filesystem mutations
+    "cp", "mv", "ln", "mkdir", "rmdir", "touch",
+    # ownership / permissions
+    "chmod", "chown", "chgrp",
+    # stream editors
+    "sed", "awk", "gawk", "perl",
+    # build systems
+    "make", "cmake", "gradle", "mvn", "dotnet", "rustc",
+    # package managers
+    "apt", "apt-get", "brew", "yum", "dnf", "pacman", "apk",
+    "yarn", "pnpm",
+    # GTFOBins-capable programs (safe sub-modes handled later)
+    "find", "less", "more", "git", "npm", "pip", "pip3", "uv",
+    "cargo", "go", "java", "javac",
+})
 
-# Tier 3: Risky commands - can modify system or exfiltrate data
-_RISKY_COMMANDS = frozenset(
-    {
-        "rm",
-        "dd",
-        "mkfs",
-        "mount",
-        "umount",
-        "fdisk",
-        "iptables",
-        "nft",
-        "ufw",
-        "systemctl",
-        "service",
-        "launchctl",
-        "crontab",
-        "at",
-        "ssh",
-        "scp",
-        "rsync",
-        "sftp",
-        "docker",
-        "podman",
-        "kubectl",
-        "nc",
-        "ncat",
-        "netcat",
-        "socat",
-        "telnet",
-        "nmap",
-    }
-)
+# Tier-3 -- can modify the host or talk to the network
+_ELEVATED_BINS = frozenset({
+    "rm", "dd", "mkfs", "mount", "umount", "fdisk",
+    "iptables", "nft", "ufw",
+    "systemctl", "service", "launchctl",
+    "crontab", "at",
+    "ssh", "scp", "rsync", "sftp",
+    "docker", "podman", "kubectl",
+    "nc", "ncat", "netcat", "socat", "telnet", "nmap",
+})
 
-# Tier 4: Dangerous commands - direct code execution, network exfiltration
-_DANGEROUS_COMMANDS = frozenset(
-    {
-        "curl",
-        "wget",
-        "eval",
-        "exec",
-        "source",
-        "bash",
-        "sh",
-        "zsh",
-        "dash",
-        "fish",
-        "csh",
-        "tcsh",
-        "ksh",
-        "sudo",
-        "su",
-        "doas",
-        "base64",  # When combined with pipe, likely obfuscation
-        "openssl",  # Can encrypt/exfil data
-        "gpg",
-    }
-)
+# Tier-4 -- direct code-exec / shell spawning / data exfiltration
+_HOSTILE_BINS = frozenset({
+    "curl", "wget",
+    "eval", "exec", "source",
+    "bash", "sh", "zsh", "dash", "fish", "csh", "tcsh", "ksh",
+    "sudo", "su", "doas",
+    "base64",   # combined with pipe -> obfuscation
+    "openssl",  # encrypt / exfil
+    "gpg",
+})
 
-# Dangerous argument patterns (command-independent)
-_DANGEROUS_ARG_PATTERNS = [
-    re.compile(r"-o\s+/dev/tcp/"),  # bash /dev/tcp redirect
-    re.compile(r">(>)?\s*/etc/"),  # Write to system config
-    re.compile(r">\s*/dev/null\s*2>&1\s*&"),  # Background + suppress output
-    # Command substitution is only high-risk when invoking dangerous programs.
+# Argument-level patterns that override any tier classification
+_HOSTILE_ARG_RES = [
+    re.compile(r"-o\s+/dev/tcp/"),
+    re.compile(r">(>)?\s*/etc/"),
+    re.compile(r">\s*/dev/null\s*2>&1\s*&"),
     re.compile(r"\$\((?:curl|wget|bash|sh|python|perl|ruby|node|nc|ncat|netcat)[^)]*\)"),
     re.compile(r"`(?:curl|wget|bash|sh|python|perl|ruby|node|nc|ncat|netcat)[^`]*`"),
-    re.compile(r"\|\s*(bash|sh|eval|exec|python|curl|wget|nc|ncat|netcat|socat)"),  # Pipe to shell/network
-    re.compile(r"-{1,2}exec\b"),  # find -exec / --exec or similar
-    re.compile(r"&&\s*(rm|dd|curl|wget|bash|sh)"),  # Chain with dangerous
-    # --- GTFOBins-style abuse patterns ---
-    # Python/python3 with -c (inline code execution)
+    re.compile(r"\|\s*(bash|sh|eval|exec|python|curl|wget|nc|ncat|netcat|socat)"),
+    re.compile(r"-{1,2}exec\b"),
+    re.compile(r"&&\s*(rm|dd|curl|wget|bash|sh)"),
+    # GTFOBins-style inline execution
     re.compile(r"\bpython[23]?\s+.*-c\s"),
-    # Node with -e/--eval (inline JS execution)
     re.compile(r"\bnode\s+.*(?:-e|--eval)\s"),
-    # Ruby with -e (inline code execution)
     re.compile(r"\bruby\s+.*-e\s"),
-    # env used to spawn a shell
     re.compile(r"\benv\s+.*(?:/bin/(?:ba)?sh|/bin/(?:z|da|fi)sh)"),
-    # find with -exec/-execdir (arbitrary command execution)
     re.compile(r"\bfind\s+.*-exec(?:dir)?\s"),
-    # less/more/man with shell escape (!)
     re.compile(r"\b(?:less|more|man)\s+.*!\s*/bin/"),
-    # pip/pip3 install from untrusted index (supply-chain attack)
     re.compile(r"\bpip[3]?\s+install\s+(?:--index-url|--extra-index-url|-i)\s"),
-    # git clone/remote chained with shell operators
     re.compile(r"\bgit\s+(?:clone|remote\s+add)\s+.*[;&|]"),
 ]
 
 
+# ---- command context ----------------------------------------------------- #
+
 @dataclass
 class CommandContext:
-    """Parsed command context for evaluation."""
+    """Structural decomposition of a raw shell command string."""
 
     raw_command: str
     base_command: str
@@ -297,277 +150,219 @@ class CommandContext:
 
 
 def parse_command(raw: str) -> CommandContext:
-    """Parse a command string into structured context."""
+    """Break a shell one-liner into its structural pieces."""
     raw = raw.strip()
     ctx = CommandContext(raw_command=raw, base_command="")
-
     if not raw:
         return ctx
 
-    # Detect pipelines, redirects, subshells
-    # Match a single pipe token and exclude logical OR (||).
+    # structural features
     ctx.has_pipeline = bool(re.search(r"(?<!\|)\|(?!\|)", raw))
     ctx.has_redirect = bool(re.search(r"[12]?>", raw))
     ctx.has_subshell = "$(" in raw or "`" in raw.replace("``", "")
     ctx.has_background = raw.rstrip().endswith("&") and not raw.rstrip().endswith("&&")
 
-    # Split chained commands (&&, ||, ;)
-    parts = re.split(r"\s*(?:&&|\|\||;)\s*", raw)
-    ctx.chained_commands = [p.strip() for p in parts if p.strip()]
+    # split on && / || / ;
+    segments = re.split(r"\s*(?:&&|\|\||;)\s*", raw)
+    ctx.chained_commands = [s.strip() for s in segments if s.strip()]
 
-    # Split the first chain segment on pipes to find downstream pipe targets.
-    # This is critical: ``cat file | curl ...`` must surface ``curl`` as a
-    # pipe target so that downstream-danger checks work correctly.
+    # identify pipe targets in the first segment
     if ctx.has_pipeline and ctx.chained_commands:
         pipe_parts = re.split(r"\s*\|\s*", ctx.chained_commands[0])
         ctx.pipe_targets = [p.strip() for p in pipe_parts[1:] if p.strip()]
 
-    # Get first base command
-    first_part = ctx.chained_commands[0] if ctx.chained_commands else raw
-    # Handle env vars, sudo prefix
-    tokens = first_part.split()
-    for i, tok in enumerate(tokens):
-        if "=" in tok and i == 0:
-            continue  # env var assignment
+    # resolve the actual binary (skip env-var prefixes, privilege wrappers, etc.)
+    lead = ctx.chained_commands[0] if ctx.chained_commands else raw
+    tokens = lead.split()
+    for idx, tok in enumerate(tokens):
+        if "=" in tok and idx == 0:
+            continue
         if tok in ("sudo", "su", "doas", "env", "nohup", "nice", "time", "timeout"):
-            continue  # prefix commands
-        ctx.base_command = tok.split("/")[-1]  # Strip path prefix
-        ctx.arguments = tokens[i + 1 :]
+            continue
+        ctx.base_command = tok.rsplit("/", 1)[-1]
+        ctx.arguments = tokens[idx + 1:]
         break
 
     if not ctx.base_command and tokens:
-        ctx.base_command = tokens[0].split("/")[-1]
+        ctx.base_command = tokens[0].rsplit("/", 1)[-1]
 
     return ctx
 
 
+# ---- evaluation entry point --------------------------------------------- #
+
 def evaluate_command(raw_command: str, *, policy=None) -> CommandVerdict:
     """
-    Evaluate a command string for safety.
+    Assess the risk of a shell command string.
 
-    Args:
-        raw_command: The full command string to evaluate
-        policy: Optional ``ScanPolicy``.  When provided, the command-safety
-            tier sets come from ``policy.command_safety`` (if non-empty),
-            allowing organisations to customise which commands are in each tier.
+    Parameters
+    ----------
+    raw_command:
+        Complete command line to evaluate.
+    policy:
+        Optional scan-policy object.  When its ``command_safety`` attribute
+        carries non-empty tier sets, those override the built-in tables so
+        that organisations can tailor classification per environment.
 
-    Returns:
-        CommandVerdict with risk level, reason, and whether to suppress YARA findings
+    Returns
+    -------
+    CommandVerdict
+        A triple of (risk, human-readable reason, yara-suppress hint).
     """
-    # Resolve effective command sets (policy overrides → hardcoded defaults)
-    safe_cmds = _SAFE_COMMANDS
-    caution_cmds = _CAUTION_COMMANDS
-    risky_cmds = _RISKY_COMMANDS
-    dangerous_cmds = _DANGEROUS_COMMANDS
+    # pick effective tier sets -- policy wins when present
+    tier1 = _BENIGN_BINS
+    tier2 = _MODERATE_BINS
+    tier3 = _ELEVATED_BINS
+    tier4 = _HOSTILE_BINS
     if policy is not None and hasattr(policy, "command_safety"):
         cs = policy.command_safety
         if cs.safe_commands:
-            safe_cmds = cs.safe_commands
+            tier1 = cs.safe_commands
         if cs.caution_commands:
-            caution_cmds = cs.caution_commands
+            tier2 = cs.caution_commands
         if cs.risky_commands:
-            risky_cmds = cs.risky_commands
+            tier3 = cs.risky_commands
         if cs.dangerous_commands:
-            dangerous_cmds = cs.dangerous_commands
+            tier4 = cs.dangerous_commands
 
     ctx = parse_command(raw_command)
 
     if not ctx.base_command:
         return CommandVerdict(CommandRisk.SAFE, "Empty command", True)
 
-    base = ctx.base_command.lower()
+    prog = ctx.base_command.lower()
 
-    # Check for dangerous argument patterns (overrides all)
-    for pattern in _DANGEROUS_ARG_PATTERNS:
-        if pattern.search(ctx.raw_command):
+    # --- arg-pattern check (highest priority) ---
+    for rgx in _HOSTILE_ARG_RES:
+        if rgx.search(ctx.raw_command):
             return CommandVerdict(
                 CommandRisk.DANGEROUS,
-                f"Dangerous argument pattern detected: {pattern.pattern}",
+                f"Hostile argument pattern matched: {rgx.pattern}",
                 False,
             )
 
+    # policy-supplied arg patterns
     if policy is not None and hasattr(policy, "command_safety"):
-        max_pat_len = getattr(
+        pat_cap = getattr(
             getattr(policy, "analysis_thresholds", None),
             "max_regex_pattern_length",
-            _MAX_PATTERN_LENGTH,
+            _REGEX_LEN_CAP,
         )
         for pat_str in getattr(policy.command_safety, "dangerous_arg_patterns", []):
             try:
-                compiled = _safe_compile(pat_str, max_length=max_pat_len)
+                compiled = _try_compile(pat_str, limit=pat_cap)
                 if compiled and compiled.search(ctx.raw_command):
                     return CommandVerdict(
                         CommandRisk.DANGEROUS,
-                        f"Policy dangerous arg pattern matched: {pat_str}",
+                        f"Policy arg-pattern hit: {pat_str}",
                         False,
                     )
             except Exception:
-                logger.warning("Failed to apply pattern %r", pat_str)
+                _log.warning("Could not apply policy pattern %r", pat_str)
 
-    # Classify base command
-    # Check safe first, then caution, then risky, then dangerous
-    # But dangerous overrides all if matched
-    if base in dangerous_cmds:
-        # Some dangerous commands have safe modes
-        if base in ("curl", "wget"):
-            # curl/wget just downloading to stdout for display is less risky
-            args_str = " ".join(ctx.arguments)
-            if not ctx.has_pipeline and not ctx.has_redirect:
-                return CommandVerdict(
-                    CommandRisk.RISKY,
-                    f"Network command '{base}' used without pipe/redirect (likely display only)",
-                    False,
-                )
-            else:
-                return CommandVerdict(
-                    CommandRisk.DANGEROUS,
-                    f"Network command '{base}' with pipe or redirect - possible exfiltration/injection",
-                    False,
-                )
-        if base == "base64":
-            if not ctx.has_pipeline:
-                return CommandVerdict(CommandRisk.CAUTION, "base64 without pipeline", True)
+    # --- tier-4 (hostile) ---
+    if prog in tier4:
+        return _assess_hostile(prog, ctx)
+
+    # --- tier-3 (elevated) ---
+    if prog in tier3:
+        return CommandVerdict(CommandRisk.RISKY, f"Elevated-risk binary: '{prog}'", False)
+
+    # --- tier-1 (benign) ---
+    if prog in tier1:
+        return _assess_benign(prog, ctx, tier4, tier3)
+
+    # --- tier-2 (moderate) ---
+    if prog in tier2:
+        return _assess_moderate(prog, ctx)
+
+    # --- unknown binary ---
+    if ctx.has_pipeline or ctx.has_subshell or ctx.has_redirect:
+        return CommandVerdict(CommandRisk.RISKY, f"Unrecognised binary '{prog}' with shell operators", False)
+    return CommandVerdict(CommandRisk.CAUTION, f"Unrecognised binary: '{prog}'", False)
+
+
+# ---- per-tier helpers ---------------------------------------------------- #
+
+def _assess_hostile(prog: str, ctx: CommandContext) -> CommandVerdict:
+    """Refine verdict for a tier-4 program that may have benign sub-modes."""
+    if prog in ("curl", "wget"):
+        if not ctx.has_pipeline and not ctx.has_redirect:
             return CommandVerdict(
-                CommandRisk.DANGEROUS,
-                "base64 in pipeline - likely obfuscation",
-                False,
-            )
-        if base in ("bash", "sh", "zsh", "dash", "fish"):
-            # Check if it's just running a script file
-            if ctx.arguments and not ctx.has_pipeline and ctx.arguments[0].endswith((".sh", ".bash")):
-                return CommandVerdict(
-                    CommandRisk.CAUTION,
-                    f"Shell executing script file: {ctx.arguments[0]}",
-                    True,
-                )
-            return CommandVerdict(
-                CommandRisk.DANGEROUS,
-                f"Shell invocation '{base}' may execute arbitrary code",
+                CommandRisk.RISKY,
+                f"Network tool '{prog}' without pipe/redirect (likely display-only)",
                 False,
             )
         return CommandVerdict(
             CommandRisk.DANGEROUS,
-            f"Dangerous command: '{base}'",
+            f"Network tool '{prog}' combined with pipe or redirect -- possible exfil/injection",
             False,
         )
 
-    if base in risky_cmds:
-        return CommandVerdict(
-            CommandRisk.RISKY,
-            f"Risky command: '{base}'",
-            False,
-        )
+    if prog == "base64":
+        if not ctx.has_pipeline:
+            return CommandVerdict(CommandRisk.CAUTION, "base64 used standalone", True)
+        return CommandVerdict(CommandRisk.DANGEROUS, "base64 inside a pipeline -- likely obfuscation", False)
 
-    if base in safe_cmds:
-        # Even safe commands can be risky in pipelines with dangerous downstream
-        if ctx.has_pipeline:
-            # Check pipe targets (split on |) and chained commands (split on &&/||/;)
-            downstream_segments = list(ctx.pipe_targets) + list(ctx.chained_commands[1:])
-            for segment in downstream_segments:
-                seg_base = segment.split()[0].split("/")[-1] if segment.split() else ""
-                if seg_base in dangerous_cmds or seg_base in risky_cmds:
-                    return CommandVerdict(
-                        CommandRisk.DANGEROUS,
-                        f"Safe command '{base}' piped to dangerous '{seg_base}'",
-                        False,
-                    )
-        # Version/help check modes
-        args_str = " ".join(ctx.arguments).lower()
-        if "--version" in args_str or "--help" in args_str or "-v" == args_str or "-h" == args_str:
-            return CommandVerdict(CommandRisk.SAFE, f"Version/help check for '{base}'", True)
+    if prog in ("bash", "sh", "zsh", "dash", "fish"):
+        if ctx.arguments and not ctx.has_pipeline and ctx.arguments[0].endswith((".sh", ".bash")):
+            return CommandVerdict(CommandRisk.CAUTION, f"Shell running script file: {ctx.arguments[0]}", True)
+        return CommandVerdict(CommandRisk.DANGEROUS, f"Shell invocation '{prog}' -- arbitrary code-exec", False)
 
-        return CommandVerdict(
-            CommandRisk.SAFE,
-            f"Safe command: '{base}'",
-            True,
-        )
+    return CommandVerdict(CommandRisk.DANGEROUS, f"Hostile binary: '{prog}'", False)
 
-    if base in caution_cmds:
-        # Check if caution commands have risky args
-        if ctx.has_pipeline or ctx.has_subshell:
-            return CommandVerdict(
-                CommandRisk.RISKY,
-                f"Caution command '{base}' with pipeline/subshell",
-                False,
-            )
 
-        # Safe sub-modes for GTFOBins-capable commands that were promoted from SAFE.
-        # These common read-only invocations are demoted back to SAFE.
-        if base == "find" and not any(a in ("-exec", "-execdir", "-ok", "-delete") for a in ctx.arguments):
-            return CommandVerdict(CommandRisk.SAFE, "find without exec/delete", True)
-
-        if base == "git":
-            _SAFE_GIT_SUBCMDS = frozenset(
-                {
-                    "status",
-                    "log",
-                    "diff",
-                    "branch",
-                    "show",
-                    "tag",
-                    "describe",
-                    "rev-parse",
-                    "ls-files",
-                    "remote",
-                    "fetch",
-                    "config",
-                }
-            )
-            if ctx.arguments and ctx.arguments[0] in _SAFE_GIT_SUBCMDS:
+def _assess_benign(prog: str, ctx: CommandContext, tier4: frozenset, tier3: frozenset) -> CommandVerdict:
+    """Refine verdict for a tier-1 program, watching for dangerous downstream."""
+    if ctx.has_pipeline:
+        downstream = list(ctx.pipe_targets) + list(ctx.chained_commands[1:])
+        for seg in downstream:
+            seg_bin = seg.split()[0].rsplit("/", 1)[-1] if seg.split() else ""
+            if seg_bin in tier4 or seg_bin in tier3:
                 return CommandVerdict(
-                    CommandRisk.SAFE,
-                    f"git {ctx.arguments[0]} is read-only",
-                    True,
+                    CommandRisk.DANGEROUS,
+                    f"Benign '{prog}' piped into hostile/elevated '{seg_bin}'",
+                    False,
                 )
 
-        if base in ("less", "more") and not ctx.has_pipeline:
-            return CommandVerdict(CommandRisk.SAFE, f"'{base}' viewing file", True)
+    joined_args = " ".join(ctx.arguments).lower()
+    if "--version" in joined_args or "--help" in joined_args or "-v" == joined_args or "-h" == joined_args:
+        return CommandVerdict(CommandRisk.SAFE, f"Version/help query for '{prog}'", True)
 
-        if base in ("npm", "pip", "pip3", "uv", "cargo", "go"):
-            _SAFE_PKG_SUBCMDS = frozenset(
-                {
-                    "list",
-                    "show",
-                    "info",
-                    "search",
-                    "outdated",
-                    "version",
-                    "help",
-                    "config",
-                    "view",
-                    "freeze",
-                }
-            )
-            if ctx.arguments and ctx.arguments[0] in _SAFE_PKG_SUBCMDS:
-                return CommandVerdict(
-                    CommandRisk.SAFE,
-                    f"{base} {ctx.arguments[0]} is read-only",
-                    True,
-                )
+    return CommandVerdict(CommandRisk.SAFE, f"Benign binary: '{prog}'", True)
 
-        if base in ("java", "javac") and not ctx.has_pipeline:
-            return CommandVerdict(
-                CommandRisk.CAUTION,
-                f"'{base}' compilation/execution",
-                True,
-            )
 
-        return CommandVerdict(
-            CommandRisk.CAUTION,
-            f"Generally safe command: '{base}'",
-            True,
-        )
+_READONLY_GIT_OPS = frozenset({
+    "status", "log", "diff", "branch", "show", "tag",
+    "describe", "rev-parse", "ls-files", "remote", "fetch", "config",
+})
 
-    # Unknown command - treat with caution
-    if ctx.has_pipeline or ctx.has_subshell or ctx.has_redirect:
-        return CommandVerdict(
-            CommandRisk.RISKY,
-            f"Unknown command '{base}' with shell operators",
-            False,
-        )
+_READONLY_PKG_OPS = frozenset({
+    "list", "show", "info", "search", "outdated",
+    "version", "help", "config", "view", "freeze",
+})
 
-    return CommandVerdict(
-        CommandRisk.CAUTION,
-        f"Unknown command: '{base}'",
-        False,
-    )
+
+def _assess_moderate(prog: str, ctx: CommandContext) -> CommandVerdict:
+    """Refine verdict for a tier-2 program with known safe sub-modes."""
+    if ctx.has_pipeline or ctx.has_subshell:
+        return CommandVerdict(CommandRisk.RISKY, f"Moderate binary '{prog}' with pipeline/subshell", False)
+
+    # safe sub-command carve-outs
+    if prog == "find" and not any(a in ("-exec", "-execdir", "-ok", "-delete") for a in ctx.arguments):
+        return CommandVerdict(CommandRisk.SAFE, "find without exec/delete", True)
+
+    if prog == "git" and ctx.arguments and ctx.arguments[0] in _READONLY_GIT_OPS:
+        return CommandVerdict(CommandRisk.SAFE, f"git {ctx.arguments[0]} is read-only", True)
+
+    if prog in ("less", "more") and not ctx.has_pipeline:
+        return CommandVerdict(CommandRisk.SAFE, f"'{prog}' viewing a file", True)
+
+    if prog in ("npm", "pip", "pip3", "uv", "cargo", "go"):
+        if ctx.arguments and ctx.arguments[0] in _READONLY_PKG_OPS:
+            return CommandVerdict(CommandRisk.SAFE, f"{prog} {ctx.arguments[0]} is read-only", True)
+
+    if prog in ("java", "javac") and not ctx.has_pipeline:
+        return CommandVerdict(CommandRisk.CAUTION, f"'{prog}' compilation/execution", True)
+
+    return CommandVerdict(CommandRisk.CAUTION, f"Moderate binary: '{prog}'", True)

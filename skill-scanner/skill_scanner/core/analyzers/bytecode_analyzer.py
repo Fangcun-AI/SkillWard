@@ -1,38 +1,21 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-Bytecode integrity verifier.
+Validates compiled Python bytecode against original source.
 
-Compares .pyc files against their corresponding .py source files using
-Python's standard `ast` module. Detects tampering where bytecode was modified
-after compilation (cf. xz-utils backdoor pattern).
+Inspects .pyc artifacts to detect post-compilation modifications by
+reconstructing the AST from bytecode and diffing it against the AST
+derived from the paired .py file. Catches supply-chain tampering
+where compiled output diverges from visible source.
 
-Dependencies: Python stdlib only (ast, marshal, struct).
-Optional: decompyle3 or uncompyle6 for decompiling bytecode without source.
+Only uses standard library modules (ast, marshal, struct).
+Can optionally leverage decompyle3 or uncompyle6 when installed.
 """
 
 import ast
 import hashlib
-import importlib.util
 import io
 import logging
 import marshal
 import struct
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -40,174 +23,158 @@ from ..models import Finding, Severity, Skill, SkillFile, ThreatCategory
 from ..scan_policy import ScanPolicy
 from .base import BaseAnalyzer
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 
 class BytecodeAnalyzer(BaseAnalyzer):
-    """Analyzes Python bytecode files (.pyc) for integrity against source."""
+    """Checks .pyc files for integrity by diffing against their .py counterparts."""
 
     def __init__(self, policy: ScanPolicy | None = None):
         super().__init__(name="bytecode", policy=policy)
 
-    def _generate_finding_id(self, rule_id: str, context: str) -> str:
-        """Generate a unique finding ID."""
-        combined = f"{rule_id}:{context}"
-        hash_obj = hashlib.sha256(combined.encode())
-        return f"{rule_id}_{hash_obj.hexdigest()[:10]}"
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def analyze(self, skill: Skill) -> list[Finding]:
-        """Run bytecode integrity checks."""
-        findings: list[Finding] = []
+        """Scan all bytecode artifacts in *skill* and return integrity findings."""
+        results: list[Finding] = []
 
-        # Gather all .pyc and .py files
-        pyc_files: list[SkillFile] = []
-        # Index .py files by their relative path for precise directory-aware
-        # matching.  A secondary stem-only index is kept as a fallback for
-        # flat layouts where __pycache__ sits next to source.
-        py_files_by_path: dict[str, SkillFile] = {}
-        py_files_by_stem: dict[str, list[SkillFile]] = {}
+        compiled_items: list[SkillFile] = []
+        src_by_relpath: dict[str, SkillFile] = {}
+        src_by_name: dict[str, list[SkillFile]] = {}
 
-        for sf in skill.files:
-            ext = sf.path.suffix.lower()
-            if ext == ".pyc":
-                pyc_files.append(sf)
-            elif ext == ".py":
-                py_files_by_path[sf.relative_path] = sf
-                py_files_by_stem.setdefault(sf.path.stem, []).append(sf)
+        for entry in skill.files:
+            suffix = entry.path.suffix.lower()
+            if suffix == ".pyc":
+                compiled_items.append(entry)
+            elif suffix == ".py":
+                src_by_relpath[entry.relative_path] = entry
+                src_by_name.setdefault(entry.path.stem, []).append(entry)
 
-        if not pyc_files:
-            return findings
+        if not compiled_items:
+            return results
 
-        # Having .pyc files at all is suspicious
-        for pyc_file in pyc_files:
-            # Try to find matching .py source
-            stem = pyc_file.path.stem
-            # Remove cpython-3XX suffix if present (e.g., "utils.cpython-312" -> "utils")
-            if ".cpython-" in stem:
-                stem = stem.split(".cpython-")[0]
+        for compiled in compiled_items:
+            base_name = compiled.path.stem
+            # Strip cpython version tag, e.g. "foo.cpython-312" -> "foo"
+            if ".cpython-" in base_name:
+                base_name = base_name.split(".cpython-")[0]
 
-            matching_py = self._find_matching_source(
-                pyc_file,
-                stem,
-                py_files_by_path,
-                py_files_by_stem,
+            source = self._locate_source_file(
+                compiled, base_name, src_by_relpath, src_by_name
             )
 
-            if matching_py is None:
-                # .pyc with no .py - can't verify
-                findings.append(
+            if source is None:
+                results.append(
                     Finding(
-                        id=self._generate_finding_id("BYTECODE_NO_SOURCE", pyc_file.relative_path),
+                        id=self._make_finding_hash("BYTECODE_NO_SOURCE", compiled.relative_path),
                         rule_id="BYTECODE_NO_SOURCE",
                         category=ThreatCategory.OBFUSCATION,
                         severity=Severity.HIGH,
                         title="Python bytecode without matching source",
                         description=(
-                            f"Bytecode file {pyc_file.relative_path} has no corresponding .py source. "
+                            f"Bytecode file {compiled.relative_path} has no corresponding .py source. "
                             f"Bytecode-only distribution hides the actual code from review."
                         ),
-                        file_path=pyc_file.relative_path,
+                        file_path=compiled.relative_path,
                         remediation="Include .py source files or remove .pyc files.",
                         analyzer=self.name,
                     )
                 )
             else:
-                # Compare bytecode against source
-                mismatch_findings = self._compare_bytecode_to_source(pyc_file, matching_py)
-                findings.extend(mismatch_findings)
+                results.extend(self._diff_compiled_vs_source(compiled, source))
 
-        return findings
+        return results
+
+    # ------------------------------------------------------------------
+    # Source-file resolution
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _find_matching_source(
-        pyc_file: SkillFile,
-        stem: str,
-        by_path: dict[str, SkillFile],
-        by_stem: dict[str, list[SkillFile]],
+    def _locate_source_file(
+        compiled_file: SkillFile,
+        base_name: str,
+        relpath_index: dict[str, SkillFile],
+        name_index: dict[str, list[SkillFile]],
     ) -> SkillFile | None:
-        """Find the .py source that corresponds to a .pyc file.
+        """Resolve which .py file a given .pyc was compiled from.
 
-        Matching strategy (most to least specific):
-
-        1. **Directory-aware lookup** — standard Python layout puts bytecode in
-           ``<pkg>/__pycache__/<module>.cpython-3XX.pyc``.  The source is
-           expected at ``<pkg>/<module>.py``.  We compute this path and do an
-           exact lookup.
-
-        2. **Same-directory lookup** — for non-``__pycache__`` locations,
-           look for ``<module>.py`` next to the ``.pyc`` file.
-
-        3. **Stem-only fallback** — if only one ``.py`` in the entire skill
-           has a matching stem, use it.  If multiple exist we return ``None``
-           rather than risk a false-positive CRITICAL finding from comparing
-           against the wrong file.
+        Applies three heuristics in priority order:
+        - Standard layout: __pycache__/<mod>.cpython-XXX.pyc maps to ../<mod>.py
+        - Co-located layout: .pyc and .py in the same directory
+        - Global stem match: if exactly one .py shares the stem, use it
+        Returns None when the match is ambiguous or absent.
         """
-        pyc_parent = Path(pyc_file.relative_path).parent
+        parent_dir = Path(compiled_file.relative_path).parent
 
-        # Strategy 1: __pycache__ → parent directory
-        if pyc_parent.name == "__pycache__":
-            expected_rel = str(pyc_parent.parent / f"{stem}.py")
-            match = by_path.get(expected_rel)
-            if match is not None:
-                return match
+        # Heuristic A: conventional __pycache__ placement
+        if parent_dir.name == "__pycache__":
+            candidate_rel = str(parent_dir.parent / f"{base_name}.py")
+            hit = relpath_index.get(candidate_rel)
+            if hit is not None:
+                return hit
 
-        # Strategy 2: same directory
-        expected_rel = str(pyc_parent / f"{stem}.py")
-        match = by_path.get(expected_rel)
-        if match is not None:
-            return match
+        # Heuristic B: same folder
+        candidate_rel = str(parent_dir / f"{base_name}.py")
+        hit = relpath_index.get(candidate_rel)
+        if hit is not None:
+            return hit
 
-        # Strategy 3: stem-only fallback (only when unambiguous)
-        candidates = by_stem.get(stem, [])
-        if len(candidates) == 1:
-            return candidates[0]
+        # Heuristic C: unique stem across the whole package
+        matches = name_index.get(base_name, [])
+        if len(matches) == 1:
+            return matches[0]
 
-        # Ambiguous or missing — safer to return None than to guess and
-        # produce a false-positive CRITICAL supply-chain finding.
         return None
 
-    def _compare_bytecode_to_source(self, pyc_file: SkillFile, py_file: SkillFile) -> list[Finding]:
-        """Compare a .pyc file against its .py source using ast.dump()."""
-        findings: list[Finding] = []
+    # ------------------------------------------------------------------
+    # AST-level comparison
+    # ------------------------------------------------------------------
 
-        # Parse the .py source into AST
-        source_content = py_file.read_content()
-        if not source_content:
-            return findings
+    def _diff_compiled_vs_source(
+        self, compiled_file: SkillFile, source_file: SkillFile
+    ) -> list[Finding]:
+        """Build ASTs from both artifacts and flag structural divergence."""
+        issues: list[Finding] = []
+
+        raw_source = source_file.read_content()
+        if not raw_source:
+            return issues
 
         try:
-            source_ast = ast.parse(source_content, filename=py_file.relative_path)
-            source_dump = ast.dump(source_ast, annotate_fields=True, include_attributes=False)
-        except SyntaxError as e:
-            logger.debug("Cannot parse %s: %s", py_file.relative_path, e)
-            return findings
+            src_tree = ast.parse(raw_source, filename=source_file.relative_path)
+            src_repr = ast.dump(src_tree, annotate_fields=True, include_attributes=False)
+        except SyntaxError as exc:
+            _log.debug("Syntax error in %s: %s", source_file.relative_path, exc)
+            return issues
 
-        # Try to load and decompile the .pyc file
-        pyc_ast = self._load_pyc_ast(pyc_file.path)
-        if pyc_ast is None:
-            # Can't decompile - without decompyle3/uncompyle6 this always fires.
-            # Don't emit a finding here; the PYCACHE_FILES_DETECTED and
-            # BYTECODE_NO_SOURCE rules already cover the important cases.
-            # Only BYTECODE_SOURCE_MISMATCH (actual tampering) is worth flagging.
-            return findings
+        compiled_tree = self._reconstruct_ast(compiled_file.path)
+        if compiled_tree is None:
+            # Cannot decompile -- other rules already cover the presence of .pyc
+            return issues
 
-        pyc_dump = ast.dump(pyc_ast, annotate_fields=True, include_attributes=False)
+        compiled_repr = ast.dump(
+            compiled_tree, annotate_fields=True, include_attributes=False
+        )
 
-        if source_dump != pyc_dump:
-            findings.append(
+        if src_repr != compiled_repr:
+            issues.append(
                 Finding(
-                    id=self._generate_finding_id("BYTECODE_SOURCE_MISMATCH", pyc_file.relative_path),
+                    id=self._make_finding_hash(
+                        "BYTECODE_SOURCE_MISMATCH", compiled_file.relative_path
+                    ),
                     rule_id="BYTECODE_SOURCE_MISMATCH",
                     category=ThreatCategory.OBFUSCATION,
                     severity=Severity.CRITICAL,
                     title="Bytecode does not match source code",
                     description=(
-                        f"CRITICAL: {pyc_file.relative_path} was compiled from different source "
-                        f"than {py_file.relative_path}. The bytecode has been tampered with to "
+                        f"CRITICAL: {compiled_file.relative_path} was compiled from different source "
+                        f"than {source_file.relative_path}. The bytecode has been tampered with to "
                         f"contain code not present in the visible .py file. "
                         f"This is a supply-chain attack pattern (cf. xz-utils)."
                     ),
-                    file_path=pyc_file.relative_path,
+                    file_path=compiled_file.relative_path,
                     remediation=(
                         "URGENT: Remove all .pyc files and investigate the source of modification. "
                         "This skill may be compromised."
@@ -216,66 +183,77 @@ class BytecodeAnalyzer(BaseAnalyzer):
                 )
             )
 
-        return findings
+        return issues
 
-    def _load_pyc_ast(self, pyc_path: Path) -> ast.AST | None:
-        """
-        Try to reconstruct an AST from a .pyc file.
+    # ------------------------------------------------------------------
+    # .pyc deserialization helpers
+    # ------------------------------------------------------------------
 
-        Strategy:
-        1. Use marshal to load the code object
-        2. Use dis to get bytecode instructions
-        3. Try decompyle3/uncompyle6 if available
-        4. Fall back to recompiling source and comparing code objects
+    def _reconstruct_ast(self, pyc_path: Path) -> ast.AST | None:
+        """Attempt to recover an AST from a compiled .pyc file.
 
-        Returns AST if successful, None otherwise.
+        Reads the bytecode header, unmarshals the code object, then tries
+        available decompilers (decompyle3, uncompyle6) to obtain source
+        text that can be re-parsed into an AST.
+        Returns None when decompilation is not possible.
         """
         try:
-            with open(pyc_path, "rb") as f:
-                # Read .pyc header
-                magic = f.read(4)
-                flags = struct.unpack("<I", f.read(4))[0]
+            code_obj = self._unmarshal_code(pyc_path)
+            if code_obj is None:
+                return None
 
-                # Check for PEP 552 hash-based validation
-                if flags & 0x1:
-                    # Hash-based .pyc
-                    f.read(8)  # source hash
+            # Attempt decompyle3 first
+            tree = self._try_decompile_with("decompyle3", code_obj)
+            if tree is not None:
+                return tree
+
+            # Fall back to uncompyle6
+            tree = self._try_decompile_with("uncompyle6", code_obj)
+            if tree is not None:
+                return tree
+
+            return None
+        except Exception as exc:
+            _log.debug("Could not process .pyc file %s: %s", pyc_path, exc)
+            return None
+
+    @staticmethod
+    def _unmarshal_code(pyc_path: Path) -> Any | None:
+        """Read and unmarshal the code object from a .pyc file."""
+        try:
+            with open(pyc_path, "rb") as fh:
+                _magic = fh.read(4)
+                flag_bits = struct.unpack("<I", fh.read(4))[0]
+
+                if flag_bits & 0x1:
+                    # PEP 552 hash-based validation
+                    fh.read(8)
                 else:
-                    # Timestamp-based .pyc
-                    f.read(4)  # timestamp
-                    f.read(4)  # source size
+                    # Legacy timestamp-based validation
+                    fh.read(4)  # timestamp
+                    fh.read(4)  # source length
 
-                # Load the code object
-                code = marshal.load(f)
-
-            # Try to decompile using decompyle3
-            try:
-                import decompyle3
-
-                output = io.StringIO()
-                decompyle3.deparse_code2str(code, out=output)
-                decompiled_source = output.getvalue()
-                return ast.parse(decompiled_source)
-            except ImportError:
-                pass
-            except Exception:
-                pass
-
-            # Try uncompyle6
-            try:
-                import uncompyle6
-
-                output = io.StringIO()
-                uncompyle6.deparse_code2str(code, out=output)
-                decompiled_source = output.getvalue()
-                return ast.parse(decompiled_source)
-            except ImportError:
-                pass
-            except Exception:
-                pass
-
+                return marshal.load(fh)
+        except Exception:
             return None
 
-        except Exception as e:
-            logger.debug("Failed to load .pyc %s: %s", pyc_path, e)
+    @staticmethod
+    def _try_decompile_with(backend_name: str, code_obj: Any) -> ast.AST | None:
+        """Run a named decompiler backend and parse the result into an AST."""
+        try:
+            backend = __import__(backend_name)
+            buf = io.StringIO()
+            backend.deparse_code2str(code_obj, out=buf)
+            return ast.parse(buf.getvalue())
+        except (ImportError, Exception):
             return None
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_finding_hash(rule: str, context: str) -> str:
+        """Produce a deterministic identifier for a finding."""
+        digest = hashlib.sha256(f"{rule}:{context}".encode()).hexdigest()[:10]
+        return f"{rule}_{digest}"

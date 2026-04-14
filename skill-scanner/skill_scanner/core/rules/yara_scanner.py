@@ -1,21 +1,5 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-YARA rule scanner for detecting malicious patterns in agent skills.
+YARA-X powered content scanner for detecting known-bad byte sequences.
 """
 
 import logging
@@ -24,238 +8,226 @@ from typing import Any
 
 import yara_x
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
-
-_MAX_SCAN_FILE_SIZE = 50 * 1024 * 1024
+# Upper bound on binary file size that the scanner will process.
+_BINARY_SIZE_CEILING = 50 * 1024 * 1024
 
 
 class YaraScanner:
-    """Scanner that uses YARA rules to detect malicious patterns."""
+    """Compiles a directory of ``.yara`` rule files and exposes content and
+    file scanning against the resulting ruleset."""
 
     def __init__(self, rules_dir: Path | None = None, *, max_scan_file_size: int = 50 * 1024 * 1024):
-        """
-        Initialize YARA scanner.
+        """Set up the scanner and eagerly compile the ruleset.
 
-        Args:
-            rules_dir: Path to directory containing .yara files
-            max_scan_file_size: Maximum binary file size in bytes to scan (default 50 MB)
+        Parameters
+        ----------
+        rules_dir:
+            Folder containing ``.yara`` source files.  Falls back to the
+            built-in core pack when *None*.
+        max_scan_file_size:
+            Files larger than this (bytes) are skipped during binary scanning.
         """
-        self.max_scan_file_size = max_scan_file_size
+        self._scan_size_limit = max_scan_file_size
+
         if rules_dir is None:
             from ...data import DATA_DIR
-
-            # Prefer the pack-based yara/ directory (new layout)
-            pack_yara = DATA_DIR / "packs" / "core" / "yara"
-            if pack_yara.is_dir():
-                rules_dir = pack_yara
+            pack_path = DATA_DIR / "packs" / "core" / "yara"
+            if pack_path.is_dir():
+                rules_dir = pack_path
             else:
-                # Fallback for external/custom installs
                 from ...data import YARA_RULES_DIR
-
                 rules_dir = YARA_RULES_DIR
 
         self.rules_dir = Path(rules_dir)
         self.rules: yara_x.Rules | None = None
-        self._load_rules()
+        self._compile_all()
 
-    def _load_rules(self):
-        """Load all YARA rules from directory."""
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _compile_all(self) -> None:
+        """Find and compile every ``.yara`` file in :attr:`rules_dir`."""
         if not self.rules_dir.exists():
             raise FileNotFoundError(f"YARA rules directory not found: {self.rules_dir}")
 
-        # Find all .yara files
-        yara_files = list(self.rules_dir.glob("*.yara"))
-        if not yara_files:
+        sources = list(self.rules_dir.glob("*.yara"))
+        if not sources:
             raise FileNotFoundError(f"No .yara files found in {self.rules_dir}")
 
-        # Compile all rules using the yara-x Compiler with namespaces
-        compiler = yara_x.Compiler()
+        comp = yara_x.Compiler()
         try:
-            for yara_file in yara_files:
-                namespace = yara_file.stem  # Use filename as namespace
-                compiler.new_namespace(namespace)
-                source = yara_file.read_text(encoding="utf-8")
-                compiler.add_source(source, origin=str(yara_file))
-            self.rules = compiler.build()
-        except yara_x.CompileError as e:
-            raise RuntimeError(f"Failed to compile YARA rules: {e}")
+            for src_file in sources:
+                comp.new_namespace(src_file.stem)
+                comp.add_source(src_file.read_text(encoding="utf-8"), origin=str(src_file))
+            self.rules = comp.build()
+        except yara_x.CompileError as exc:
+            raise RuntimeError(f"Failed to compile YARA rules: {exc}")
+
+    @staticmethod
+    def _build_rule_meta(rule) -> dict[str, Any]:
+        """Extract metadata fields from a YARA-X matching rule object."""
+        return {
+            "rule_name": rule.identifier,
+            "namespace": rule.namespace,
+            "tags": list(rule.tags),
+            "meta": dict(rule.metadata),
+        }
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def scan_content(self, content: str, file_path: str | None = None) -> list[dict[str, Any]]:
-        """
-        Scan content with YARA rules.
+        """Evaluate all compiled rules against UTF-8 text *content*.
 
-        Args:
-            content: Text content to scan
-            file_path: Optional file path for context
+        Parameters
+        ----------
+        content:
+            The text to scan.
+        file_path:
+            An optional identifier used in result records for traceability.
 
-        Returns:
-            List of matches with metadata
+        Returns
+        -------
+        list[dict]
+            One entry per matching rule, each containing ``rule_name``,
+            ``namespace``, ``file_path``, ``meta``, and ``strings``.
         """
-        if not self.rules:
+        if self.rules is None:
             return []
 
-        matches = []
+        encoded = content.encode("utf-8")
+        detections: list[dict[str, Any]] = []
 
         try:
-            # yara-x scans bytes, not str
-            content_bytes = content.encode("utf-8")
-            scan_results = self.rules.scan(content_bytes)
+            results = self.rules.scan(encoded)
+        except yara_x.ScanError as exc:
+            _log.warning("YARA scanning error: %s", exc)
+            return []
 
-            for rule in scan_results.matching_rules:
-                # Extract metadata from the rule
-                # rule.metadata is a tuple of (key, value) pairs; convert to dict
-                meta_dict = dict(rule.metadata)
-                meta = {
-                    "rule_name": rule.identifier,
-                    "namespace": rule.namespace,
-                    "tags": list(rule.tags),
-                    "meta": meta_dict,
-                }
+        for matched_rule in results.matching_rules:
+            meta_block = self._build_rule_meta(matched_rule)
+            string_hits: list[dict[str, Any]] = []
 
-                # Find which patterns matched and their locations
-                matched_strings = []
-                for pattern in rule.patterns:
-                    for match in pattern.matches:
-                        # Extract matched data from content bytes
-                        matched_data_bytes = content_bytes[match.offset : match.offset + match.length]
+            for pat in matched_rule.patterns:
+                for hit in pat.matches:
+                    raw_bytes = encoded[hit.offset: hit.offset + hit.length]
+                    line_idx = encoded[:hit.offset].count(b"\n") + 1
 
-                        # YARA-X reports offsets in bytes. Compute line/column using
-                        # byte slices to avoid drift on multi-byte UTF-8 content.
-                        line_num = content_bytes[: match.offset].count(b"\n") + 1
-                        line_start = content_bytes.rfind(b"\n", 0, match.offset) + 1
-                        line_end = content_bytes.find(b"\n", match.offset)
-                        if line_end == -1:
-                            line_end = len(content_bytes)
-                        line_content = content_bytes[line_start:line_end].decode("utf-8", errors="ignore").strip()
+                    # Derive the source line containing the match
+                    sol = encoded.rfind(b"\n", 0, hit.offset) + 1
+                    eol = encoded.find(b"\n", hit.offset)
+                    if eol == -1:
+                        eol = len(encoded)
+                    source_line = encoded[sol:eol].decode("utf-8", errors="ignore").strip()
 
-                        matched_strings.append(
-                            {
-                                "identifier": pattern.identifier,
-                                "offset": match.offset,
-                                "matched_data": matched_data_bytes.decode("utf-8", errors="ignore"),
-                                "line_number": line_num,
-                                "line_content": line_content,
-                            }
-                        )
+                    string_hits.append({
+                        "identifier": pat.identifier,
+                        "offset": hit.offset,
+                        "matched_data": raw_bytes.decode("utf-8", errors="ignore"),
+                        "line_number": line_idx,
+                        "line_content": source_line,
+                    })
 
-                matches.append(
-                    {
-                        "rule_name": rule.identifier,
-                        "namespace": rule.namespace,
-                        "file_path": file_path,
-                        "meta": meta,
-                        "strings": matched_strings,
-                    }
-                )
+            detections.append({
+                "rule_name": matched_rule.identifier,
+                "namespace": matched_rule.namespace,
+                "file_path": file_path,
+                "meta": meta_block,
+                "strings": string_hits,
+            })
 
-        except yara_x.ScanError as e:
-            logger.warning("YARA scanning error: %s", e)
-
-        return matches
+        return detections
 
     def scan_file(self, file_path: Path | str, display_path: str | None = None) -> list[dict[str, Any]]:
+        """Scan a single file on disk.
+
+        Text files (valid UTF-8) are routed through :meth:`scan_content` so
+        that line-level location data is available.  Files that fail UTF-8
+        decoding are handled via a raw-bytes fallback path.
+
+        Parameters
+        ----------
+        file_path:
+            On-disk location of the target file.
+        display_path:
+            Cosmetic path surfaced in result records instead of *file_path*.
+
+        Returns
+        -------
+        list[dict]
+            Same structure as :meth:`scan_content`.
         """
-        Scan a file with YARA rules.
+        target = str(file_path)
+        label = display_path if display_path is not None else target
 
-        For text files the content is read as UTF-8 and delegated to
-        :meth:`scan_content` so that line numbers are available in results.
-
-        For binary files (those that cannot be decoded as UTF-8) the scanner
-        falls back to YARA-X's native ``Scanner.scan_file(...)`` which works
-        directly on raw bytes.
-
-        Args:
-            file_path: Path to file to scan (absolute or relative).
-            display_path: Optional path to show in match results instead of
-                *file_path* (e.g. a relative path for cleaner output).
-
-        Returns:
-            List of matches in the same format as :meth:`scan_content`.
-        """
-        file_path = str(file_path)
-        context_path = display_path or file_path
-
-        # Try text-mode first (gives line numbers via scan_content)
         try:
-            with open(file_path, encoding="utf-8") as f:
-                content = f.read()
-            return self.scan_content(content, context_path)
+            with open(target, encoding="utf-8") as fh:
+                text = fh.read()
+            return self.scan_content(text, label)
         except UnicodeDecodeError:
-            pass  # Fall through to binary scanning
-        except OSError as e:
-            logger.warning("Could not read file %s: %s", file_path, e)
+            pass
+        except OSError as exc:
+            _log.warning("Could not read file %s: %s", target, exc)
             return []
 
-        # Binary fallback — use YARA-X native file scanning
-        return self._scan_file_binary(file_path, context_path)
+        return self._handle_binary_scan(target, label)
 
-    def _scan_file_binary(self, file_path: str, display_path: str) -> list[dict[str, Any]]:
-        """Scan a binary file using YARA-X's Scanner.scan_file.
+    def _handle_binary_scan(self, file_path: str, display_path: str) -> list[dict[str, Any]]:
+        """Perform a raw-bytes scan on a non-UTF-8 file.
 
-        Since the file is not valid UTF-8, line numbers are not meaningful.
-        Matched data is decoded with ``errors="ignore"`` and offsets are
-        reported as byte offsets.
+        Since the content is not text, line numbers are set to ``0`` and the
+        line_content field describes the byte offset instead.
         """
-        if not self.rules:
+        if self.rules is None:
             return []
 
-        path = Path(file_path)
-        file_size = path.stat().st_size
-        if file_size > self.max_scan_file_size:
-            logger.warning("Skipping %s: file size %d bytes exceeds scan limit", file_path, file_size)
+        fsize = Path(file_path).stat().st_size
+        if fsize > self._scan_size_limit:
+            _log.warning("Skipping %s: file size %d bytes exceeds scan limit", file_path, fsize)
             return []
 
-        matches = []
+        detections: list[dict[str, Any]] = []
         try:
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
+            with open(file_path, "rb") as fh:
+                raw = fh.read()
 
             scanner = yara_x.Scanner(self.rules)
-            scan_results = scanner.scan(file_bytes)
+            results = scanner.scan(raw)
 
-            for rule in scan_results.matching_rules:
-                meta_dict = dict(rule.metadata)
-                meta = {
-                    "rule_name": rule.identifier,
-                    "namespace": rule.namespace,
-                    "tags": list(rule.tags),
-                    "meta": meta_dict,
-                }
+            for matched_rule in results.matching_rules:
+                meta_block = self._build_rule_meta(matched_rule)
+                string_hits: list[dict[str, Any]] = []
 
-                matched_strings = []
-                for pattern in rule.patterns:
-                    for match in pattern.matches:
-                        matched_data_bytes = file_bytes[match.offset : match.offset + match.length]
-                        matched_strings.append(
-                            {
-                                "identifier": pattern.identifier,
-                                "offset": match.offset,
-                                "matched_data": matched_data_bytes.decode("utf-8", errors="ignore"),
-                                "line_number": 0,  # Not meaningful for binary
-                                "line_content": f"[binary file at byte offset {match.offset}]",
-                            }
-                        )
+                for pat in matched_rule.patterns:
+                    for hit in pat.matches:
+                        raw_bytes = raw[hit.offset: hit.offset + hit.length]
+                        string_hits.append({
+                            "identifier": pat.identifier,
+                            "offset": hit.offset,
+                            "matched_data": raw_bytes.decode("utf-8", errors="ignore"),
+                            "line_number": 0,
+                            "line_content": f"[binary file at byte offset {hit.offset}]",
+                        })
 
-                matches.append(
-                    {
-                        "rule_name": rule.identifier,
-                        "namespace": rule.namespace,
-                        "file_path": display_path,
-                        "meta": meta,
-                        "strings": matched_strings,
-                    }
-                )
+                detections.append({
+                    "rule_name": matched_rule.identifier,
+                    "namespace": matched_rule.namespace,
+                    "file_path": display_path,
+                    "meta": meta_block,
+                    "strings": string_hits,
+                })
 
-        except yara_x.ScanError as e:
-            logger.warning("YARA binary scanning error for %s: %s", file_path, e)
+        except yara_x.ScanError as exc:
+            _log.warning("YARA binary scanning error for %s: %s", file_path, exc)
 
-        return matches
+        return detections
 
     def get_loaded_rules(self) -> list[str]:
-        """Get list of loaded rule names."""
-        if not self.rules:
+        """Return the namespace identifiers of all compiled rule files."""
+        if self.rules is None:
             return []
-        # Return namespaces based on .yara filenames
-        yara_files = list(self.rules_dir.glob("*.yara"))
-        return [f.stem for f in yara_files]
+        return [f.stem for f in self.rules_dir.glob("*.yara")]
