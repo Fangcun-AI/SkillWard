@@ -1,26 +1,10 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-Threat mapping from scanner threat names to AITech Taxonomy.
+Scanner threat classification and severity assignment.
 
-This module provides mappings between different analyzers' threat names
-and the standardized AITech industry taxonomy threat classifications.
-
-Implements AITech codes (AITech-X.Y) for consistent threat categorization.
+Maps threat names produced by different analyzers (LLM, YARA/static,
+behavioural) to standardised AITech taxonomy codes, severity levels,
+and human-readable descriptions.  Supports runtime overrides loaded
+from an external JSON file.
 """
 
 import json
@@ -29,13 +13,17 @@ import os
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Core mapping class -- public name is ThreatMapping
+# ---------------------------------------------------------------------------
 
 class ThreatMapping:
-    """Mapping of threat names to AITech Taxonomy classifications with severity."""
+    """Registry that associates scanner threat names with AITech codes and severity."""
 
-    # LLM Analyzer Threats
+    # -- LLM-based analyser findings --
     LLM_THREATS = {
         "PROMPT INJECTION": {
             "scanner_category": "PROMPT INJECTION",
@@ -86,7 +74,7 @@ class ThreatMapping:
         },
     }
 
-    # YARA/Static Analyzer Threats
+    # -- YARA / static-analysis findings --
     YARA_THREATS = {
         "COMMAND INJECTION": {
             "scanner_category": "INJECTION ATTACK",
@@ -136,9 +124,9 @@ class ThreatMapping:
         "TOOL CHAINING ABUSE": {
             "scanner_category": "DATA EXFILTRATION",
             "severity": "HIGH",
-            "aitech": "AITech-8.2",  # Data Exfiltration / Exposure (from Framework)
+            "aitech": "AITech-8.2",
             "aitech_name": "Data Exfiltration / Exposure",
-            "aisubtech": "AISubtech-8.2.3",  # Data Exfiltration via Agent Tooling (from Framework)
+            "aisubtech": "AISubtech-8.2.3",
             "aisubtech_name": "Data Exfiltration via Agent Tooling",
             "description": "Suspicious multi-step tool chaining to exfiltrate data - read→send, collect→post, traverse→upload patterns.",
         },
@@ -244,7 +232,7 @@ class ThreatMapping:
         },
     }
 
-    # Behavioral Analyzer Threats
+    # -- Behavioural analyser findings --
     BEHAVIORAL_THREATS = {
         "PROMPT INJECTION": {
             "scanner_category": "PROMPT INJECTION",
@@ -266,99 +254,79 @@ class ThreatMapping:
         },
     }
 
-    # Canonical mapping from AITech code to internal ThreatCategory enum value.
-    # This can be extended/overridden via SKILL_SCANNER_THREAT_MAPPING_PATH.
+    # Maps an AITech code to a short internal category tag.
     AITECH_TO_CATEGORY = {
-        "AITech-1.1": "prompt_injection",  # Direct Prompt Injection
-        "AITech-1.2": "prompt_injection",  # Indirect Prompt Injection
-        "AITech-2.1": "social_engineering",  # Jailbreak
-        "AITech-4.3": "skill_discovery_abuse",  # Protocol Manipulation / Capability Inflation
-        "AITech-8.2": "data_exfiltration",  # Data Exfiltration / Exposure
-        "AITech-9.1": "command_injection",  # Model or Agentic System Manipulation (injection attacks)
-        "AITech-9.2": "obfuscation",  # Detection Evasion / Obfuscation Vulnerabilities
-        "AITech-9.3": "supply_chain_attack",  # Dependency / Plugin Compromise
-        "AITech-12.1": "unauthorized_tool_use",  # Tool Exploitation
-        "AITech-13.1": "resource_abuse",  # Disruption of Availability (AISubtech-13.1.1: Compute Exhaustion)
-        "AITech-15.1": "harmful_content",  # Harmful Content
-        "AITech-99.9": "policy_violation",  # Unknown Threat
+        "AITech-1.1": "prompt_injection",
+        "AITech-1.2": "prompt_injection",
+        "AITech-2.1": "social_engineering",
+        "AITech-4.3": "skill_discovery_abuse",
+        "AITech-8.2": "data_exfiltration",
+        "AITech-9.1": "command_injection",
+        "AITech-9.2": "obfuscation",
+        "AITech-9.3": "supply_chain_attack",
+        "AITech-12.1": "unauthorized_tool_use",
+        "AITech-13.1": "resource_abuse",
+        "AITech-15.1": "harmful_content",
+        "AITech-99.9": "policy_violation",
     }
+
+    # -----------------------------------------------------------------
+    # Lookup helpers
+    # -----------------------------------------------------------------
 
     @classmethod
     def get_threat_mapping(cls, analyzer: str, threat_name: str) -> dict[str, Any]:
+        """Resolve an analyser/threat pair to its full taxonomy record.
+
+        Returns a dict with keys such as ``severity``, ``aitech``,
+        ``aisubtech``, ``description``, etc.  If the threat name is not
+        recognised a generic "unknown" record is returned instead of
+        raising.
         """
-        Get the AITech Taxonomy mapping for a given threat.
-
-        Args:
-            analyzer: The analyzer type ('llm', 'yara', 'behavioral')
-            threat_name: The threat name from the analyzer
-
-        Returns:
-            Dictionary containing the threat mapping information including severity
-
-        Raises:
-            ValueError: If analyzer or threat_name is not found
-        """
-        analyzer_map: dict[str, dict[str, dict[str, Any]]] = {
+        registry: dict[str, dict[str, dict[str, Any]]] = {
             "llm": cls.LLM_THREATS,
             "yara": cls.YARA_THREATS,
             "behavioral": cls.BEHAVIORAL_THREATS,
-            "static": cls.YARA_THREATS,  # Static analyzer uses same taxonomy as YARA
+            "static": cls.YARA_THREATS,
         }
 
-        analyzer_lower = analyzer.lower()
-        if analyzer_lower not in analyzer_map:
+        norm_analyzer = analyzer.lower()
+        if norm_analyzer not in registry:
             raise ValueError(f"Unknown analyzer: {analyzer}")
 
-        threats: dict[str, dict[str, Any]] = analyzer_map[analyzer_lower]
-        # Normalize: convert underscores to spaces for consistent lookup
-        threat_upper = threat_name.upper().replace("_", " ")
+        pool = registry[norm_analyzer]
+        norm_threat = threat_name.upper().replace("_", " ")
 
-        if threat_upper not in threats:
-            # Return generic mapping if not found
-            return {
-                "scanner_category": "UNKNOWN",
-                "severity": "MEDIUM",
-                "aitech": "AITech-99.9",
-                "aitech_name": "Unknown Threat",
-                "aisubtech": "AISubtech-99.9.9",
-                "aisubtech_name": "Unclassified",
-                "description": f"Unclassified threat: {threat_name}",
-            }
+        if norm_threat in pool:
+            return pool[norm_threat]
 
-        return threats[threat_upper]
+        return {
+            "scanner_category": "UNKNOWN",
+            "severity": "MEDIUM",
+            "aitech": "AITech-99.9",
+            "aitech_name": "Unknown Threat",
+            "aisubtech": "AISubtech-99.9.9",
+            "aisubtech_name": "Unclassified",
+            "description": f"Unclassified threat: {threat_name}",
+        }
 
     @classmethod
     def get_threat_category_from_aitech(cls, aitech_code: str) -> str:
-        """
-        Map AITech code to ThreatCategory enum value.
-
-        Args:
-            aitech_code: AITech code (e.g., "AITech-1.1")
-
-        Returns:
-            ThreatCategory enum value string (e.g., "prompt_injection")
-        """
+        """Translate an AITech code into the matching internal category tag."""
         return cls.AITECH_TO_CATEGORY.get(aitech_code, "policy_violation")
 
     @classmethod
     def get_threat_mapping_by_aitech(cls, aitech_code: str) -> dict[str, Any]:
+        """Find the first threat record that carries the given AITech code.
+
+        Searches LLM, YARA, and behavioural dictionaries in order.  When
+        no match exists a generic placeholder is returned.
         """
-        Get threat mapping information by AITech code.
+        for table in (cls.LLM_THREATS, cls.YARA_THREATS, cls.BEHAVIORAL_THREATS):
+            for _name, info in table.items():
+                if info.get("aitech") == aitech_code:
+                    return info
 
-        Args:
-            aitech_code: AITech code (e.g., "AITech-1.1")
-
-        Returns:
-            Dictionary containing threat mapping information
-        """
-        # Search through all threat dictionaries to find matching AITech code
-        threat_dicts: list[dict[str, dict[str, Any]]] = [cls.LLM_THREATS, cls.YARA_THREATS, cls.BEHAVIORAL_THREATS]
-        for threat_dict in threat_dicts:
-            for threat_name, threat_info in threat_dict.items():
-                if threat_info.get("aitech") == aitech_code:
-                    return threat_info
-
-        # Return generic mapping if not found
         return {
             "scanner_category": "UNKNOWN",
             "severity": "MEDIUM",
@@ -371,105 +339,110 @@ class ThreatMapping:
 
     @classmethod
     def get_framework_mappings_for_threat(cls, analyzer: str, threat_name: str) -> list[str]:
-        """Get de-duplicated cross-framework mappings for a scanner threat."""
-        from .fangcun_ai_taxonomy import get_framework_mappings
+        """Collect cross-framework references for a specific scanner finding."""
+        from .threat_taxonomy import get_framework_mappings
 
-        mapping = cls.get_threat_mapping(analyzer, threat_name)
-        aitech_code = str(mapping.get("aitech") or "")
-        aisubtech_code = str(mapping.get("aisubtech") or "")
+        record = cls.get_threat_mapping(analyzer, threat_name)
+        at_code = str(record.get("aitech") or "")
+        ast_code = str(record.get("aisubtech") or "")
         return get_framework_mappings(
-            aitech_code=aitech_code if aitech_code.startswith("AITech-") else None,
-            aisubtech_code=aisubtech_code if aisubtech_code.startswith("AISubtech-") else None,
+            aitech_code=at_code if at_code.startswith("AITech-") else None,
+            aisubtech_code=ast_code if ast_code.startswith("AISubtech-") else None,
         )
 
 
-_THREAT_MAPPING_ENV_VAR = "SKILL_SCANNER_THREAT_MAPPING_PATH"
+# ---------------------------------------------------------------------------
+# Runtime override machinery
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_ENV_KEY = "SKILL_SCANNER_THREAT_MAPPING_PATH"
 _ACTIVE_THREAT_MAPPING_SOURCE = "builtin"
 
+# Snapshots of the original class-level dicts so we can roll back.
+_ORIG_LLM: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.LLM_THREATS.items()}
+_ORIG_YARA: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.YARA_THREATS.items()}
+_ORIG_BEHAVIORAL: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.BEHAVIORAL_THREATS.items()}
+_ORIG_CATEGORY_MAP: dict[str, str] = dict(ThreatMapping.AITECH_TO_CATEGORY)
 
-def _load_custom_mapping_payload(path: Path) -> dict[str, Any]:
-    """Load custom threat-mapping JSON payload."""
-    if not path.exists():
-        raise FileNotFoundError(f"Threat mapping file not found: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
+
+def _restore_defaults() -> None:
+    """Overwrite ThreatMapping class dicts with the original snapshots."""
+    ThreatMapping.LLM_THREATS = {k: dict(v) for k, v in _ORIG_LLM.items()}
+    ThreatMapping.YARA_THREATS = {k: dict(v) for k, v in _ORIG_YARA.items()}
+    ThreatMapping.BEHAVIORAL_THREATS = {k: dict(v) for k, v in _ORIG_BEHAVIORAL.items()}
+    ThreatMapping.AITECH_TO_CATEGORY = dict(_ORIG_CATEGORY_MAP)
+
+
+def _read_override_file(filepath: Path) -> dict[str, Any]:
+    """Parse a JSON override file into a Python dict."""
+    if not filepath.exists():
+        raise FileNotFoundError(f"Threat mapping file not found: {filepath}")
+    content = json.loads(filepath.read_text(encoding="utf-8"))
+    if not isinstance(content, dict):
         raise ValueError("Threat mapping payload must be a JSON object")
-    return payload
+    return content
 
 
-def _merge_threat_dict(base: dict[str, dict[str, Any]], override: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Merge per-threat overrides into a threat mapping dictionary."""
-    merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in base.items()}
-    for threat_name, threat_info in override.items():
-        if not isinstance(threat_info, dict):
-            raise ValueError(f"Threat override for {threat_name!r} must be an object")
-        normalized = str(threat_name).upper().replace("_", " ")
-        current = dict(merged.get(normalized, {}))
-        current.update(threat_info)
-        merged[normalized] = current
-    return merged
+def _overlay_threat_dict(
+    base: dict[str, dict[str, Any]],
+    overrides: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Layer per-threat overrides on top of a base threat dictionary."""
+    combined: dict[str, dict[str, Any]] = {k: dict(v) for k, v in base.items()}
+    for name, info in overrides.items():
+        if not isinstance(info, dict):
+            raise ValueError(f"Threat override for {name!r} must be an object")
+        key = str(name).upper().replace("_", " ")
+        existing = dict(combined.get(key, {}))
+        existing.update(info)
+        combined[key] = existing
+    return combined
 
 
-def _create_simple_mapping(threats_dict):
-    """Create simplified mapping with threat_category, threat_type, and severity."""
-    return {
-        name: {
-            "threat_category": info["scanner_category"],
-            "threat_type": name.lower().replace("_", " "),
-            "severity": info.get("severity", "UNKNOWN"),
-        }
-        for name, info in threats_dict.items()
-    }
-
-
-# Built-in baseline copies (immutable) used for reset/reconfigure.
-_BASE_LLM_THREATS: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.LLM_THREATS.items()}
-_BASE_YARA_THREATS: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.YARA_THREATS.items()}
-_BASE_BEHAVIORAL_THREATS: dict[str, dict[str, Any]] = {k: dict(v) for k, v in ThreatMapping.BEHAVIORAL_THREATS.items()}
-_BASE_AITECH_TO_CATEGORY: dict[str, str] = dict(ThreatMapping.AITECH_TO_CATEGORY)
-
-
-def _reset_threat_mapping_defaults() -> None:
-    """Reset ThreatMapping class dictionaries to built-in defaults."""
-    ThreatMapping.LLM_THREATS = {k: dict(v) for k, v in _BASE_LLM_THREATS.items()}
-    ThreatMapping.YARA_THREATS = {k: dict(v) for k, v in _BASE_YARA_THREATS.items()}
-    ThreatMapping.BEHAVIORAL_THREATS = {k: dict(v) for k, v in _BASE_BEHAVIORAL_THREATS.items()}
-    ThreatMapping.AITECH_TO_CATEGORY = dict(_BASE_AITECH_TO_CATEGORY)
-
-
-def _apply_custom_threat_mapping_payload(payload: dict[str, Any]) -> None:
-    """Apply payload overrides on top of current ThreatMapping dictionaries."""
-    key_map = {
+def _apply_overrides(payload: dict[str, Any]) -> None:
+    """Merge a parsed override payload into ThreatMapping's class dicts."""
+    attr_aliases = {
         "llm_threats": "LLM_THREATS",
         "yara_threats": "YARA_THREATS",
         "behavioral_threats": "BEHAVIORAL_THREATS",
     }
-
-    for key, value in payload.items():
-        lower = key.lower()
-        if lower in key_map:
-            if not isinstance(value, dict):
+    for key, section in payload.items():
+        lowered = key.lower()
+        if lowered in attr_aliases:
+            if not isinstance(section, dict):
                 raise ValueError(f"{key} override must be an object")
-            attr = key_map[lower]
-            base = getattr(ThreatMapping, attr)
-            setattr(ThreatMapping, attr, _merge_threat_dict(base, value))
-        elif lower in {"aitech_to_category", "aitech_category_map"}:
-            if not isinstance(value, dict):
+            attr = attr_aliases[lowered]
+            current = getattr(ThreatMapping, attr)
+            setattr(ThreatMapping, attr, _overlay_threat_dict(current, section))
+        elif lowered in ("aitech_to_category", "aitech_category_map"):
+            if not isinstance(section, dict):
                 raise ValueError(f"{key} override must be an object")
-            merged = dict(ThreatMapping.AITECH_TO_CATEGORY)
-            merged.update({str(k): str(v) for k, v in value.items()})
-            ThreatMapping.AITECH_TO_CATEGORY = merged
+            updated = dict(ThreatMapping.AITECH_TO_CATEGORY)
+            updated.update({str(k): str(v) for k, v in section.items()})
+            ThreatMapping.AITECH_TO_CATEGORY = updated
 
+
+def _build_simple_mapping(full_threats: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """Derive a lightweight threat_category/threat_type/severity view."""
+    return {
+        name: {
+            "threat_category": record["scanner_category"],
+            "threat_type": name.lower().replace("_", " "),
+            "severity": record.get("severity", "UNKNOWN"),
+        }
+        for name, record in full_threats.items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public configuration entry-point
+# ---------------------------------------------------------------------------
 
 def configure_threat_mappings(path: str | Path | None = None) -> str:
-    """Configure active threat mapping overrides from file or environment.
+    """Load threat-mapping overrides from a JSON file or reset to defaults.
 
-    Args:
-        path: Optional JSON file path. If provided, it overrides
-            SKILL_SCANNER_THREAT_MAPPING_PATH for the current process.
-
-    Returns:
-        Active source string ("builtin" or absolute mapping file path).
+    *path* takes precedence; otherwise ``SKILL_SCANNER_THREAT_MAPPING_PATH``
+    is checked.  Returns ``"builtin"`` or the resolved override path.
     """
     global LLM_THREAT_MAPPING
     global YARA_THREAT_MAPPING
@@ -477,86 +450,68 @@ def configure_threat_mappings(path: str | Path | None = None) -> str:
     global STATIC_THREAT_MAPPING
     global _ACTIVE_THREAT_MAPPING_SOURCE
 
-    configured = str(path) if path is not None else os.getenv(_THREAT_MAPPING_ENV_VAR)
+    target = str(path) if path is not None else os.getenv(_OVERRIDE_ENV_KEY)
     if path is not None:
-        if configured:
-            os.environ[_THREAT_MAPPING_ENV_VAR] = configured
+        if target:
+            os.environ[_OVERRIDE_ENV_KEY] = target
         else:
-            os.environ.pop(_THREAT_MAPPING_ENV_VAR, None)
+            os.environ.pop(_OVERRIDE_ENV_KEY, None)
 
-    _reset_threat_mapping_defaults()
+    _restore_defaults()
 
-    if configured:
-        resolved = Path(configured).expanduser().resolve()
-        payload = _load_custom_mapping_payload(resolved)
-        _apply_custom_threat_mapping_payload(payload)
+    if target:
+        resolved = Path(target).expanduser().resolve()
+        data = _read_override_file(resolved)
+        _apply_overrides(data)
         _ACTIVE_THREAT_MAPPING_SOURCE = str(resolved)
-        logger.info("Loaded custom threat mappings from %s", resolved)
+        _log.info("Loaded custom threat mappings from %s", resolved)
     else:
         _ACTIVE_THREAT_MAPPING_SOURCE = "builtin"
 
-    LLM_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.LLM_THREATS)
-    YARA_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.YARA_THREATS)
-    BEHAVIORAL_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.BEHAVIORAL_THREATS)
+    LLM_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.LLM_THREATS)
+    YARA_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.YARA_THREATS)
+    BEHAVIORAL_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.BEHAVIORAL_THREATS)
     STATIC_THREAT_MAPPING = YARA_THREAT_MAPPING
     return _ACTIVE_THREAT_MAPPING_SOURCE
 
 
 def get_threat_mapping_source() -> str:
-    """Return active threat-mapping source marker."""
+    """Return the label describing the active threat-mapping origin."""
     return _ACTIVE_THREAT_MAPPING_SOURCE
 
 
-# Initialize runtime overrides once on module import.
+# Initialise on first import; swallow errors gracefully.
 try:
     configure_threat_mappings()
-except Exception as e:
-    logger.warning("Failed to load custom threat mapping overrides: %s", e)
-    _reset_threat_mapping_defaults()
+except Exception as exc:
+    _log.warning("Failed to load custom threat mapping overrides: %s", exc)
+    _restore_defaults()
     _ACTIVE_THREAT_MAPPING_SOURCE = "builtin"
-    LLM_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.LLM_THREATS)
-    YARA_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.YARA_THREATS)
-    BEHAVIORAL_THREAT_MAPPING = _create_simple_mapping(ThreatMapping.BEHAVIORAL_THREATS)
+    LLM_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.LLM_THREATS)
+    YARA_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.YARA_THREATS)
+    BEHAVIORAL_THREAT_MAPPING = _build_simple_mapping(ThreatMapping.BEHAVIORAL_THREATS)
     STATIC_THREAT_MAPPING = YARA_THREAT_MAPPING
 
 
-# Simplified mappings for analyzers (includes severity, category, and type)
-# These are initialized by configure_threat_mappings() above.
-
+# ---------------------------------------------------------------------------
+# Standalone severity / category helpers
+# ---------------------------------------------------------------------------
 
 def get_threat_severity(analyzer: str, threat_name: str) -> str:
-    """
-    Get severity level for a threat.
-
-    Args:
-        analyzer: Analyzer type
-        threat_name: Threat name
-
-    Returns:
-        Severity string
-    """
+    """Return the severity string for a given analyser + threat pair."""
     try:
-        mapping = ThreatMapping.get_threat_mapping(analyzer, threat_name)
-        severity = mapping.get("severity", "MEDIUM")
-        return str(severity) if severity is not None else "MEDIUM"
+        record = ThreatMapping.get_threat_mapping(analyzer, threat_name)
+        sev = record.get("severity", "MEDIUM")
+        return str(sev) if sev is not None else "MEDIUM"
     except ValueError:
         return "MEDIUM"
 
 
 def get_threat_category(analyzer: str, threat_name: str) -> str:
-    """
-    Get scanner category for a threat.
-
-    Args:
-        analyzer: Analyzer type
-        threat_name: Threat name
-
-    Returns:
-        Category string
-    """
+    """Return the scanner category string for a given analyser + threat pair."""
     try:
-        mapping = ThreatMapping.get_threat_mapping(analyzer, threat_name)
-        category = mapping.get("scanner_category", "UNKNOWN")
-        return str(category) if category is not None else "UNKNOWN"
+        record = ThreatMapping.get_threat_mapping(analyzer, threat_name)
+        cat = record.get("scanner_category", "UNKNOWN")
+        return str(cat) if cat is not None else "UNKNOWN"
     except ValueError:
         return "UNKNOWN"

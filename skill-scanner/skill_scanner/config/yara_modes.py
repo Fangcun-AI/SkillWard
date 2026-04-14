@@ -1,32 +1,12 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-YARA Mode Configuration System
+Preset and custom detection profiles for the YARA rule engine.
 
-Provides configurable detection modes to balance false positives vs true positives:
-- STRICT: Maximum security, higher false positives acceptable
-- BALANCED: Default mode, good tradeoff between FP and TP
-- PERMISSIVE: Minimize false positives, may miss some threats
-- CUSTOM: User-defined thresholds
+Three built-in profiles trade off sensitivity against noise:
+  STRICT    -- maximise detection, tolerate more false positives
+  BALANCED  -- default middle ground
+  PERMISSIVE -- suppress noisy rules, prioritise precision
 
-Each mode configures:
-- Rule-specific thresholds
-- Post-processing filters
-- Enabled/disabled rule sets
+A CUSTOM profile lets callers set every knob individually.
 """
 
 from dataclasses import dataclass, field
@@ -34,7 +14,7 @@ from enum import Enum
 
 
 class YaraMode(Enum):
-    """YARA detection mode presets."""
+    """Identifies which detection profile is active."""
 
     STRICT = "strict"
     BALANCED = "balanced"
@@ -42,15 +22,15 @@ class YaraMode(Enum):
     CUSTOM = "custom"
 
 
+# -- per-category tuning knobs -------------------------------------------- #
+
 @dataclass
 class UnicodeStegConfig:
-    """Configuration for unicode steganography detection."""
+    """Knobs for zero-width and invisible-character detection."""
 
-    # Zero-width character thresholds
-    zerowidth_threshold_with_decode: int = 50  # When dangerous code is present
-    zerowidth_threshold_alone: int = 200  # Without dangerous code context
+    zerowidth_threshold_with_decode: int = 50
+    zerowidth_threshold_alone: int = 200
 
-    # Enable/disable specific patterns
     detect_rtl_override: bool = True
     detect_ltl_override: bool = True
     detect_line_separators: bool = True
@@ -60,12 +40,10 @@ class UnicodeStegConfig:
 
 @dataclass
 class CredentialHarvestingConfig:
-    """Configuration for credential harvesting detection."""
+    """Knobs for secret / credential exfiltration rules."""
 
-    # Placeholder filtering
     filter_placeholder_patterns: bool = True
 
-    # Specific API key patterns
     detect_ai_api_keys: bool = True
     detect_aws_keys: bool = True
     detect_ssh_keys: bool = True
@@ -74,54 +52,53 @@ class CredentialHarvestingConfig:
 
 @dataclass
 class ToolChainingConfig:
-    """Configuration for tool chaining abuse detection."""
+    """Knobs for multi-tool abuse chain detection."""
 
-    # Post-filter settings
     filter_api_documentation: bool = True
     filter_generic_http_verbs: bool = True
     filter_email_field_mentions: bool = True
 
-    # Pattern detection
     detect_read_send: bool = True
     detect_collect_exfil: bool = True
     detect_env_network: bool = True
 
 
+# -- main config object --------------------------------------------------- #
+
 @dataclass
 class YaraModeConfig:
-    """Complete YARA mode configuration."""
+    """Aggregates all per-category knobs under a single detection profile."""
 
     mode: YaraMode = YaraMode.BALANCED
     description: str = ""
 
-    # Rule-specific configs
     unicode_steg: UnicodeStegConfig = field(default_factory=UnicodeStegConfig)
     credential_harvesting: CredentialHarvestingConfig = field(default_factory=CredentialHarvestingConfig)
     tool_chaining: ToolChainingConfig = field(default_factory=ToolChainingConfig)
 
-    # Global settings
-    enabled_rules: set[str] = field(default_factory=set)  # Empty = all enabled
+    enabled_rules: set[str] = field(default_factory=set)   # empty -> everything on
     disabled_rules: set[str] = field(default_factory=set)
+
+    # -- factory classmethods ---------------------------------------------- #
 
     @classmethod
     def strict(cls) -> "YaraModeConfig":
         """
-        STRICT mode: Maximum security, accept higher FP rate.
+        High-sensitivity profile that flags aggressively.
 
-        Use when:
-        - Scanning untrusted/external skills
-        - Security audit requirements
-        - Compliance scanning
+        Best suited for auditing untrusted third-party integrations or
+        meeting compliance requirements where missing a finding is worse
+        than a false alarm.
         """
         return cls(
             mode=YaraMode.STRICT,
-            description="Maximum security - flags more potential threats",
+            description="Aggressive detection -- more alerts, fewer misses",
             unicode_steg=UnicodeStegConfig(
-                zerowidth_threshold_with_decode=20,  # Lower threshold
+                zerowidth_threshold_with_decode=20,
                 zerowidth_threshold_alone=100,
             ),
             credential_harvesting=CredentialHarvestingConfig(
-                filter_placeholder_patterns=False,  # Don't filter - flag for review
+                filter_placeholder_patterns=False,
             ),
             tool_chaining=ToolChainingConfig(
                 filter_api_documentation=False,
@@ -132,16 +109,14 @@ class YaraModeConfig:
     @classmethod
     def balanced(cls) -> "YaraModeConfig":
         """
-        BALANCED mode: Default - good tradeoff between FP and TP.
+        Middle-ground profile (the default).
 
-        Use when:
-        - Regular skill scanning
-        - CI/CD pipeline integration
-        - Development workflow
+        Appropriate for routine scanning in CI pipelines or day-to-day
+        development work.
         """
         return cls(
             mode=YaraMode.BALANCED,
-            description="Balanced detection - default mode",
+            description="Default profile -- reasonable trade-off",
             unicode_steg=UnicodeStegConfig(
                 zerowidth_threshold_with_decode=50,
                 zerowidth_threshold_alone=200,
@@ -159,20 +134,18 @@ class YaraModeConfig:
     @classmethod
     def permissive(cls) -> "YaraModeConfig":
         """
-        PERMISSIVE mode: Minimize false positives.
+        Low-noise profile that suppresses borderline findings.
 
-        Use when:
-        - Scanning trusted/internal skills
-        - High FP rate is disrupting workflow
-        - Focus on critical threats only
+        Use when scanning trusted internal code or when alert fatigue
+        from false positives is a concern.
         """
         return cls(
             mode=YaraMode.PERMISSIVE,
-            description="Minimal false positives - may miss some threats",
+            description="Quiet mode -- fewer alerts, some threats may go unreported",
             unicode_steg=UnicodeStegConfig(
-                zerowidth_threshold_with_decode=100,  # Higher threshold
+                zerowidth_threshold_with_decode=100,
                 zerowidth_threshold_alone=500,
-                detect_line_separators=False,  # Common in some content
+                detect_line_separators=False,
             ),
             credential_harvesting=CredentialHarvestingConfig(
                 filter_placeholder_patterns=True,
@@ -182,7 +155,6 @@ class YaraModeConfig:
                 filter_generic_http_verbs=True,
                 filter_email_field_mentions=True,
             ),
-            # Disable noisier rules
             disabled_rules={
                 "capability_inflation_generic",
                 "indirect_prompt_injection_generic",
@@ -199,18 +171,21 @@ class YaraModeConfig:
         disabled_rules: set[str] | None = None,
     ) -> "YaraModeConfig":
         """
-        CUSTOM mode: User-defined configuration.
+        Fully caller-controlled profile.
 
-        Args:
-            unicode_steg: Unicode steganography config
-            credential_harvesting: Credential harvesting config
-            tool_chaining: Tool chaining config
-            enabled_rules: Set of rule names to enable (empty = all)
-            disabled_rules: Set of rule names to disable
+        Any parameter left as ``None`` gets the default sub-config.
+
+        Parameters
+        ----------
+        unicode_steg:       Invisible-character detection settings.
+        credential_harvesting: Secret-leak detection settings.
+        tool_chaining:      Multi-tool abuse chain settings.
+        enabled_rules:      Allowlist (empty means all rules are on).
+        disabled_rules:     Denylist applied after the allowlist.
         """
         return cls(
             mode=YaraMode.CUSTOM,
-            description="Custom user-defined configuration",
+            description="Caller-supplied configuration",
             unicode_steg=unicode_steg or UnicodeStegConfig(),
             credential_harvesting=credential_harvesting or CredentialHarvestingConfig(),
             tool_chaining=tool_chaining or ToolChainingConfig(),
@@ -220,28 +195,30 @@ class YaraModeConfig:
 
     @classmethod
     def from_mode_name(cls, mode_name: str) -> "YaraModeConfig":
-        """Create config from mode name string."""
-        mode_map = {
+        """Instantiate a profile by its string name (case-insensitive)."""
+        _factories = {
             "strict": cls.strict,
             "balanced": cls.balanced,
             "permissive": cls.permissive,
         }
-        if mode_name.lower() in mode_map:
-            return mode_map[mode_name.lower()]()
-        raise ValueError(f"Unknown mode: {mode_name}. Use: strict, balanced, permissive, or custom")
+        key = mode_name.lower()
+        if key in _factories:
+            return _factories[key]()
+        raise ValueError(
+            f"No built-in profile called '{mode_name}'. "
+            f"Choose from: strict, balanced, permissive, or use custom()."
+        )
+
+    # -- instance helpers -------------------------------------------------- #
 
     def is_rule_enabled(self, rule_name: str) -> bool:
-        """Check if a specific rule is enabled in this mode."""
-        # If enabled_rules is specified, only those are allowed
+        """Return whether *rule_name* should fire under this profile."""
         if self.enabled_rules and rule_name not in self.enabled_rules:
             return False
-        # Check if explicitly disabled
-        if rule_name in self.disabled_rules:
-            return False
-        return True
+        return rule_name not in self.disabled_rules
 
     def to_dict(self) -> dict:
-        """Convert config to dictionary for serialization."""
+        """Serialise the full configuration to a plain dictionary."""
         return {
             "mode": self.mode.value,
             "description": self.description,
@@ -274,5 +251,5 @@ class YaraModeConfig:
         }
 
 
-# Default mode
+# Convenience default instance
 DEFAULT_YARA_MODE = YaraModeConfig.balanced()

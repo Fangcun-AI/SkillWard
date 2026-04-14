@@ -1,21 +1,5 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 """
-Data models for agent skills and security findings.
+Definitions for skill packages, scan outcomes, and aggregated reports.
 """
 
 from dataclasses import dataclass, field
@@ -26,7 +10,7 @@ from typing import Any
 
 
 class Severity(str, Enum):
-    """Severity levels for security findings."""
+    """Risk level assigned to each detected issue."""
 
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
@@ -37,7 +21,7 @@ class Severity(str, Enum):
 
 
 class ThreatCategory(str, Enum):
-    """Categories of security threats."""
+    """Classification labels for identified security concerns."""
 
     PROMPT_INJECTION = "prompt_injection"
     COMMAND_INJECTION = "command_injection"
@@ -50,7 +34,6 @@ class ThreatCategory(str, Enum):
     POLICY_VIOLATION = "policy_violation"
     MALWARE = "malware"
     HARMFUL_CONTENT = "harmful_content"
-    # New threat categories
     SKILL_DISCOVERY_ABUSE = "skill_discovery_abuse"
     TRANSITIVE_TRUST_ABUSE = "transitive_trust_abuse"
     AUTONOMY_ABUSE = "autonomy_abuse"
@@ -61,14 +44,10 @@ class ThreatCategory(str, Enum):
 
 @dataclass
 class SkillManifest:
-    """Parsed YAML frontmatter from SKILL.md.
+    """Structured representation of SKILL.md YAML frontmatter.
 
-    Supports Codex Skills and Cursor Agent Skills formats,
-    which follow the Agent Skills specification. The format includes:
-    - Required: name, description
-    - Optional: license, compatibility, allowed-tools, metadata
-    - Cursor Skills: disable-model-invocation (controls automatic invocation)
-    - Codex Skills: metadata.short-description (optional user-facing description)
+    Handles both Codex and Cursor agent skill formats. Required
+    fields are ``name`` and ``description``; everything else is optional.
     """
 
     name: str
@@ -80,68 +59,66 @@ class SkillManifest:
     disable_model_invocation: bool = False
 
     def __post_init__(self):
-        """Normalize allowed_tools to list."""
+        """Ensure allowed_tools is always stored as a list."""
         if self.allowed_tools is None:
             self.allowed_tools = []
         elif isinstance(self.allowed_tools, str):
-            # Agent skill docs commonly show comma-separated tool lists in YAML frontmatter
-            # (e.g., "allowed-tools: Read, Grep, Glob"). Treat this as a list.
-            parts = [p.strip() for p in self.allowed_tools.split(",")]
-            self.allowed_tools = [p for p in parts if p]
+            self.allowed_tools = [
+                tok for tok in (t.strip() for t in self.allowed_tools.split(",")) if tok
+            ]
 
     @property
     def short_description(self) -> str | None:
-        """Get short-description from metadata (Codex Skills format)."""
-        if self.metadata and isinstance(self.metadata, dict):
+        """Extract optional short-description value from the metadata dict."""
+        if isinstance(self.metadata, dict):
             return self.metadata.get("short-description")
         return None
 
 
 @dataclass
 class SkillFile:
-    """A file within a skill package."""
+    """Represents a single file belonging to a skill package."""
 
     path: Path
     relative_path: str
     file_type: str  # 'markdown', 'python', 'bash', 'binary', 'other'
     content: str | None = None
     size_bytes: int = 0
-    # Extraction metadata (populated when file was extracted from an archive)
     extracted_from: str | None = None
     archive_depth: int = 0
 
     def read_content(self) -> str:
-        """Read file content if not already loaded."""
+        """Load and cache the file contents, returning an empty string on failure."""
         if self.content is None and self.path.exists():
             try:
-                with open(self.path, encoding="utf-8") as f:
-                    self.content = f.read()
+                self.content = self.path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
-                self.content = ""  # Binary or unreadable file
+                self.content = ""
         return self.content or ""
 
     @property
     def is_hidden(self) -> bool:
-        """Check if this file is a hidden file (dotfile) or inside a hidden directory."""
-        parts = Path(self.relative_path).parts
-        return any(part.startswith(".") and part != "." for part in parts)
+        """True when the file resides under a dotfile or dot-directory."""
+        return any(
+            segment.startswith(".") and segment != "."
+            for segment in Path(self.relative_path).parts
+        )
 
     @property
     def is_pycache(self) -> bool:
-        """Check if this file is inside a __pycache__ directory."""
+        """True when the file sits inside a __pycache__ folder."""
         return "__pycache__" in Path(self.relative_path).parts
 
 
 @dataclass
 class Skill:
-    """Represents a complete Agent Skill package.
+    """A fully loaded agent skill, including manifest and all associated files.
 
-    Supports the Agent Skills specification format used by
-    OpenAI Codex Skills and Cursor Agent Skills. The package structure includes:
-    - SKILL.md (required): Manifest and instructions
-    - scripts/ (optional): Executable code
-    - references/ (optional): Documentation files
-    - assets/ (optional): Templates and resources
+    Standard package layout:
+      - SKILL.md -- manifest with instructions
+      - scripts/  -- runnable code
+      - references/ -- supporting docs
+      - assets/ -- templates and static resources
     """
 
     directory: Path
@@ -160,17 +137,18 @@ class Skill:
         return self.manifest.description
 
     def get_scripts(self) -> list[SkillFile]:
-        """Get all script files (Python, Bash, JavaScript, TypeScript)."""
-        return [f for f in self.files if f.file_type in ("python", "bash", "javascript", "typescript")]
+        """Return every file classified as executable code."""
+        script_types = {"python", "bash", "javascript", "typescript"}
+        return [sf for sf in self.files if sf.file_type in script_types]
 
     def get_markdown_files(self) -> list[SkillFile]:
-        """Get all markdown files."""
-        return [f for f in self.files if f.file_type == "markdown"]
+        """Return every markdown file in the skill package."""
+        return [sf for sf in self.files if sf.file_type == "markdown"]
 
 
 @dataclass
 class Finding:
-    """A security issue discovered in a skill."""
+    """One discrete security issue detected during analysis."""
 
     id: str  # Unique finding identifier (e.g., rule ID + line number)
     rule_id: str  # Rule that triggered this finding
@@ -186,26 +164,32 @@ class Finding:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert finding to dictionary."""
-        return {
-            "id": self.id,
-            "rule_id": self.rule_id,
-            "category": self.category.value,
-            "severity": self.severity.value,
-            "title": self.title,
-            "description": self.description,
-            "file_path": self.file_path,
-            "line_number": self.line_number,
-            "snippet": self.snippet,
-            "remediation": self.remediation,
-            "analyzer": self.analyzer,
-            "metadata": self.metadata,
-        }
+        """Serialize this finding into a plain dictionary."""
+        output: dict[str, Any] = {}
+        for attr in (
+            "id", "rule_id", "title", "description",
+            "file_path", "line_number", "snippet",
+            "remediation", "analyzer", "metadata",
+        ):
+            output[attr] = getattr(self, attr)
+        output["category"] = self.category.value
+        output["severity"] = self.severity.value
+        return output
+
+
+# Ordered from most to least severe, used for comparisons.
+_SEVERITY_RANKING = [
+    Severity.CRITICAL,
+    Severity.HIGH,
+    Severity.MEDIUM,
+    Severity.LOW,
+    Severity.INFO,
+]
 
 
 @dataclass
 class ScanResult:
-    """Results from scanning a single skill."""
+    """Outcome of scanning a single skill package."""
 
     skill_name: str
     skill_directory: str
@@ -220,36 +204,34 @@ class ScanResult:
 
     @property
     def is_safe(self) -> bool:
-        """Check if skill passed all security checks."""
-        return not any(f.severity in (Severity.CRITICAL, Severity.HIGH) for f in self.findings)
+        """True when no CRITICAL or HIGH severity issues were found."""
+        return all(
+            f.severity not in (Severity.CRITICAL, Severity.HIGH)
+            for f in self.findings
+        )
 
     @property
     def max_severity(self) -> Severity:
-        """Get the highest severity level found."""
+        """Determine the most severe finding level present."""
         if not self.findings:
             return Severity.SAFE
-
-        severity_order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
-        for severity in severity_order:
-            if any(f.severity == severity for f in self.findings):
-                return severity
+        for level in _SEVERITY_RANKING:
+            for f in self.findings:
+                if f.severity == level:
+                    return level
         return Severity.SAFE
 
     def get_findings_by_severity(self, severity: Severity) -> list[Finding]:
-        """Get all findings of a specific severity."""
+        """Filter findings to only those matching the given severity."""
         return [f for f in self.findings if f.severity == severity]
 
     def get_findings_by_category(self, category: ThreatCategory) -> list[Finding]:
-        """Get all findings of a specific category."""
+        """Filter findings to only those matching the given threat category."""
         return [f for f in self.findings if f.category == category]
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert scan result to dictionary.
-
-        Output format is compatible with mcp-scanner-plugin's SkillResultParser.
-        See: https://github.com/fangcunguard/mcp-scanner-plugin
-        """
-        result = {
+        """Produce a dictionary suitable for JSON serialization."""
+        payload: dict[str, Any] = {
             "skill_name": self.skill_name,
             "skill_path": self.skill_directory,
             "is_safe": self.is_safe,
@@ -257,19 +239,19 @@ class ScanResult:
             "findings_count": len(self.findings),
             "findings": [f.to_dict() for f in self.findings],
             "scan_duration_seconds": self.scan_duration_seconds,
-            "duration_ms": int(self.scan_duration_seconds * 1000),  # Plugin expects duration_ms
+            "duration_ms": int(self.scan_duration_seconds * 1000),
             "analyzers_used": self.analyzers_used,
             "timestamp": self.timestamp.isoformat(),
             "scan_metadata": self.scan_metadata or {},
         }
         if self.analyzers_failed:
-            result["analyzers_failed"] = self.analyzers_failed
-        return result
+            payload["analyzers_failed"] = self.analyzers_failed
+        return payload
 
 
 @dataclass
 class Report:
-    """Aggregated report from scanning one or more skills."""
+    """Combined report spanning one or more scanned skills."""
 
     scan_results: list[ScanResult] = field(default_factory=list)
     total_skills_scanned: int = 0
@@ -284,55 +266,60 @@ class Report:
     cross_skill_findings: list[Finding] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def _increment_severity_counters(self, findings: list[Finding]) -> None:
-        for finding in findings:
-            if finding.severity == Severity.CRITICAL:
-                self.critical_count += 1
-            elif finding.severity == Severity.HIGH:
-                self.high_count += 1
-            elif finding.severity == Severity.MEDIUM:
-                self.medium_count += 1
-            elif finding.severity == Severity.LOW:
-                self.low_count += 1
-            elif finding.severity == Severity.INFO:
-                self.info_count += 1
+    def _tally_severities(self, items: list[Finding]) -> None:
+        """Walk a list of findings and bump the matching severity counter."""
+        counter_map = {
+            Severity.CRITICAL: "critical_count",
+            Severity.HIGH: "high_count",
+            Severity.MEDIUM: "medium_count",
+            Severity.LOW: "low_count",
+            Severity.INFO: "info_count",
+        }
+        for item in items:
+            attr = counter_map.get(item.severity)
+            if attr is not None:
+                setattr(self, attr, getattr(self, attr) + 1)
 
     def add_scan_result(self, result: ScanResult):
-        """Add a scan result and update counters."""
+        """Incorporate a single skill's scan outcome into the report."""
         self.scan_results.append(result)
         self.total_skills_scanned += 1
         self.total_findings += len(result.findings)
-        self._increment_severity_counters(result.findings)
-
+        self._tally_severities(result.findings)
         if result.is_safe:
             self.safe_count += 1
 
     def add_cross_skill_findings(self, findings: list[Finding]) -> None:
-        """Add cross-skill findings without inflating skill counts."""
+        """Record findings that span multiple skills without double-counting skills."""
         self.cross_skill_findings.extend(findings)
         self.total_findings += len(findings)
-        self._increment_severity_counters(findings)
+        self._tally_severities(findings)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert report to dictionary."""
-        result: dict[str, Any] = {
-            "summary": {
-                "total_skills_scanned": self.total_skills_scanned,
-                "total_findings": self.total_findings,
-                "safe_skills": self.safe_count,
-                "findings_by_severity": {
-                    "critical": self.critical_count,
-                    "high": self.high_count,
-                    "medium": self.medium_count,
-                    "low": self.low_count,
-                    "info": self.info_count,
-                },
-                "timestamp": self.timestamp.isoformat(),
-            },
+        """Build a nested dictionary representing the full report."""
+        severity_breakdown = {
+            "critical": self.critical_count,
+            "high": self.high_count,
+            "medium": self.medium_count,
+            "low": self.low_count,
+            "info": self.info_count,
+        }
+        overview: dict[str, Any] = {
+            "total_skills_scanned": self.total_skills_scanned,
+            "total_findings": self.total_findings,
+            "safe_skills": self.safe_count,
+            "findings_by_severity": severity_breakdown,
+            "timestamp": self.timestamp.isoformat(),
+        }
+        if self.skills_skipped:
+            overview["skills_skipped"] = self.skills_skipped
+
+        output: dict[str, Any] = {
+            "summary": overview,
             "results": [r.to_dict() for r in self.scan_results],
         }
         if self.cross_skill_findings:
-            result["cross_skill_findings"] = [f.to_dict() for f in self.cross_skill_findings]
-        if self.skills_skipped:
-            result["summary"]["skills_skipped"] = self.skills_skipped
-        return result
+            output["cross_skill_findings"] = [
+                f.to_dict() for f in self.cross_skill_findings
+            ]
+        return output

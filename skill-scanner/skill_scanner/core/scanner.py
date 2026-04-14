@@ -1,22 +1,4 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
-"""
-Core scanner engine for orchestrating skill analysis.
-"""
+"""Skill analysis orchestration engine."""
 
 from __future__ import annotations
 
@@ -38,73 +20,21 @@ from .loader import SkillLoader, SkillLoadError
 from .models import Finding, Report, ScanResult, Severity, Skill, ThreatCategory
 from .scan_policy import ScanPolicy
 
-logger = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
-# Common stop words for Jaccard similarity - created once at module level
-_STOP_WORDS = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "could",
-        "should",
-        "can",
-        "may",
-        "might",
-        "must",
-        "shall",
-        "to",
-        "of",
-        "in",
-        "for",
-        "on",
-        "with",
-        "at",
-        "by",
-        "from",
-        "as",
-        "into",
-        "through",
-        "and",
-        "or",
-        "but",
-        "if",
-        "then",
-        "else",
-        "when",
-        "up",
-        "down",
-        "out",
-        "that",
-        "this",
-        "these",
-        "those",
-        "it",
-        "its",
-        "they",
-        "them",
-        "their",
-    }
-)
+_TRIVIAL_TOKENS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "can", "may", "might", "must", "shall", "to", "of", "in",
+    "for", "on", "with", "at", "by", "from", "as", "into", "through",
+    "and", "or", "but", "if", "then", "else", "when", "up", "down",
+    "out", "that", "this", "these", "those", "it", "its", "they",
+    "them", "their",
+})
 
 
 class SkillScanner:
-    """Main scanner that orchestrates skill analysis."""
+    """Primary entry point that coordinates multiple analyzers against skill packages."""
 
     def __init__(
         self,
@@ -114,554 +44,82 @@ class SkillScanner:
         virustotal_upload_files: bool = False,
         policy: ScanPolicy | None = None,
     ):
-        """
-        Initialize scanner with analyzers.
+        """Set up the scanner with the given analyzer chain and configuration.
 
-        Args:
-            analyzers: List of analyzers to use. If None, uses default (static).
-            use_virustotal: Whether to enable VirusTotal binary scanning
-            virustotal_api_key: VirusTotal API key (required if use_virustotal=True)
-            virustotal_upload_files: If True, upload unknown files to VT. If False (default),
-                                    only check existing hashes
-            policy: Scan policy for org-specific allowlists and rule scoping.
-                If None, loads built-in defaults.
+        Parameters
+        ----------
+        analyzers:
+            Explicit list of analyzer instances.  When *None*, the default
+            static analysis stack is constructed automatically.
+        use_virustotal:
+            Activate the VirusTotal binary-file checker.
+        virustotal_api_key:
+            Credential for the VT v3 API (required when *use_virustotal* is set).
+        virustotal_upload_files:
+            When *True*, unknown binaries are uploaded to VT for scanning.
+            Otherwise only pre-existing hash reports are queried.
+        policy:
+            Organisational scan policy.  Falls back to built-in defaults.
         """
         self.policy = policy or ScanPolicy.default()
 
         if analyzers is None:
-            # Delegate to the centralised factory so core analyzer
-            # construction is defined in exactly one place.
             self.analyzers: list[BaseAnalyzer] = build_core_analyzers(self.policy)
 
             if use_virustotal and virustotal_api_key:
                 from .analyzers.virustotal_analyzer import VirusTotalAnalyzer
 
-                vt_analyzer = VirusTotalAnalyzer(
-                    api_key=virustotal_api_key, enabled=True, upload_files=virustotal_upload_files
+                vt = VirusTotalAnalyzer(
+                    api_key=virustotal_api_key,
+                    enabled=True,
+                    upload_files=virustotal_upload_files,
                 )
-                self.analyzers.append(vt_analyzer)
+                self.analyzers.append(vt)
         else:
             self.analyzers = analyzers
 
-        # Warn if MetaAnalyzer is in the analyzers list -- it must be
-        # orchestrated separately via analyze_with_findings().
         for a in self.analyzers:
             if a.get_name() == "meta_analyzer":
-                logger.warning(
-                    "MetaAnalyzer was passed in the analyzers list, but it cannot "
-                    "produce findings via the normal analyze() pipeline. It will be "
-                    "skipped during scanning. Use the CLI --enable-meta flag or call "
-                    "MetaAnalyzer.analyze_with_findings() after scanning instead."
+                _log.warning(
+                    "MetaAnalyzer is present in the analyzer list but cannot "
+                    "emit findings through the standard analyze() path.  It "
+                    "will be ignored during scanning.  Invoke "
+                    "MetaAnalyzer.analyze_with_findings() separately."
                 )
                 break
 
-        loader_max_bytes = self.policy.file_limits.max_loader_file_size_bytes
-        self.loader = SkillLoader(max_file_size_bytes=loader_max_bytes)
+        max_bytes = self.policy.file_limits.max_loader_file_size_bytes
+        self.loader = SkillLoader(max_file_size_bytes=max_bytes)
         self.content_extractor = ContentExtractor()
 
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
     def scan_skill(self, skill_directory: str | Path, *, lenient: bool = False) -> ScanResult:
+        """Analyse a single skill package located at *skill_directory*.
+
+        Parameters
+        ----------
+        skill_directory:
+            Filesystem path that contains the skill manifest and resources.
+        lenient:
+            When *True*, malformed YAML or missing manifest fields are
+            tolerated instead of raising.
+
+        Returns
+        -------
+        ScanResult
+            Aggregated findings, timing data, and analyzability metrics.
+
+        Raises
+        ------
+        SkillLoadError
+            If the skill cannot be parsed and *lenient* is *False*.
         """
-        Scan a single skill package.
-
-        Args:
-            skill_directory: Path to skill directory
-            lenient: Tolerate malformed YAML / missing fields in the skill.
-
-        Returns:
-            ScanResult with findings
-
-        Raises:
-            SkillLoadError: If skill cannot be loaded (when not lenient)
-        """
-        if not isinstance(skill_directory, Path):
-            skill_directory = Path(skill_directory)
-
+        skill_directory = Path(skill_directory) if not isinstance(skill_directory, Path) else skill_directory
         skill = self.loader.load_skill(skill_directory, lenient=lenient)
-        return self._scan_single_skill(skill, skill_directory)
-
-    # ------------------------------------------------------------------
-    # Shared single-skill scanning logic (used by both scan_skill and
-    # scan_directory for identical behaviour).
-    # ------------------------------------------------------------------
-
-    def _scan_single_skill(self, skill: Skill, skill_directory: Path) -> ScanResult:
-        """Run the full analysis pipeline on a loaded skill.
-
-        This is the shared implementation that both ``scan_skill`` and
-        ``scan_directory`` delegate to.  It guarantees identical two-phase
-        (non-LLM → LLM w/ enrichment) behaviour regardless of entry point.
-        """
-        start_time = time.time()
-
-        # Pre-processing: Extract archives and add extracted files to skill
-        extraction_result = self.content_extractor.extract_skill_archives(skill.files)
-        if extraction_result.extracted_files:
-            skill.files.extend(extraction_result.extracted_files)
-
-        try:
-            # Run all analyzers in two phases:
-            # Phase 1: Non-LLM analyzers (static, pipeline, behavioral, etc.)
-            # Phase 2: LLM analyzers (enriched with Phase 1 context)
-            all_findings: list[Finding] = []
-            # Include any archive extraction findings (zip bombs, path traversal, etc.)
-            all_findings.extend(extraction_result.findings)
-            analyzer_names: list[str] = []
-            analyzers_failed: list[dict[str, str]] = []
-            validated_binary_files: set[str] = set()
-            llm_analyzers: list[BaseAnalyzer] = []
-            unreferenced_scripts: list[str] = []
-            llm_scan_meta: dict[str, Any] = {}
-
-            for analyzer in self.analyzers:
-                # Defer LLM analyzers to Phase 2
-                if analyzer.get_name() in ("llm_analyzer", "meta_analyzer"):
-                    llm_analyzers.append(analyzer)
-                    continue
-                findings = analyzer.analyze(skill)
-                all_findings.extend(findings)
-                analyzer_names.append(analyzer.get_name())
-
-                if hasattr(analyzer, "validated_binary_files"):
-                    validated_binary_files.update(analyzer.validated_binary_files)
-
-                # Collect unreferenced scripts from the static analyzer for
-                # LLM enrichment (no longer emitted as standalone findings).
-                if hasattr(analyzer, "get_unreferenced_scripts"):
-                    unreferenced_scripts = analyzer.get_unreferenced_scripts()
-
-            # Phase 2: Run LLM analyzers with enrichment context from Phase 1
-            if llm_analyzers:
-                enrichment = self._build_enrichment_context(skill, all_findings, unreferenced_scripts)
-                for analyzer in llm_analyzers:
-                    if hasattr(analyzer, "set_enrichment_context") and enrichment:
-                        # Build structured enrichment for the LLM
-                        type_counts: dict[str, int] = {}
-                        for sf in skill.files:
-                            type_counts[sf.file_type] = type_counts.get(sf.file_type, 0) + 1
-                        magic_mismatches = [
-                            f.file_path for f in all_findings if f.rule_id and "MAGIC" in f.rule_id and f.file_path
-                        ]
-                        static_summaries = [
-                            f"{f.rule_id}: {f.title}"
-                            for f in all_findings
-                            if f.severity in (Severity.CRITICAL, Severity.HIGH)
-                        ][:10]
-                        analyzer.set_enrichment_context(
-                            file_inventory={
-                                "total_files": len(skill.files),
-                                "types": type_counts,
-                                "unreferenced_scripts": unreferenced_scripts,
-                            },
-                            magic_mismatches=magic_mismatches if magic_mismatches else None,
-                            static_findings_summary=static_summaries if static_summaries else None,
-                        )
-                    findings = analyzer.analyze(skill)
-                    all_findings.extend(findings)
-                    analyzer_names.append(analyzer.get_name())
-
-                    # Track analyzer failures for machine-readable output
-                    if hasattr(analyzer, "last_error") and analyzer.last_error:
-                        analyzers_failed.append({"analyzer": analyzer.get_name(), "error": analyzer.last_error})
-
-                    # Capture skill-level LLM assessment for scan_metadata
-                    if hasattr(analyzer, "last_overall_assessment"):
-                        llm_scan_meta["llm_overall_assessment"] = analyzer.last_overall_assessment
-                        llm_scan_meta["llm_primary_threats"] = getattr(analyzer, "last_primary_threats", [])
-
-            # Post-process findings: Suppress BINARY_FILE_DETECTED for VirusTotal-validated files
-            if validated_binary_files:
-                filtered_findings = []
-                for finding in all_findings:
-                    if finding.rule_id == "BINARY_FILE_DETECTED" and finding.file_path in validated_binary_files:
-                        continue
-                    filtered_findings.append(finding)
-                all_findings = filtered_findings
-
-            # Global safety net: enforce disabled_rules across ALL analyzers
-            if self.policy.disabled_rules:
-                all_findings = [f for f in all_findings if f.rule_id not in self.policy.disabled_rules]
-
-            # Apply severity overrides from policy
-            self._apply_severity_overrides(all_findings)
-
-            # Compute analyzability score
-            analyzability = compute_analyzability(skill, policy=self.policy)
-
-            # Generate findings from low analyzability (fail-closed posture)
-            all_findings.extend(self._analyzability_findings(analyzability))
-
-            # Normalize duplicate findings at final output stage (policy-controlled).
-            all_findings = self._normalize_findings(all_findings)
-
-            # Attach same-path rule co-occurrence metadata (policy-controlled).
-            self._annotate_same_path_rule_cooccurrence(all_findings)
-
-            # Attach policy fingerprint metadata for traceability (policy-controlled).
-            policy_meta = self._policy_fingerprint_metadata()
-            if llm_scan_meta:
-                policy_meta.update(llm_scan_meta)
-            self._annotate_findings_with_policy(all_findings, policy_meta)
-
-        finally:
-            # Always cleanup temporary extraction directories, even if an
-            # analyzer raises an exception, to avoid leaking temp files.
-            self.content_extractor.cleanup()
-
-        scan_duration = time.time() - start_time
-
-        result = ScanResult(
-            skill_name=skill.name,
-            skill_directory=str(skill_directory.absolute()),
-            findings=all_findings,
-            scan_duration_seconds=scan_duration,
-            analyzers_used=analyzer_names,
-            analyzers_failed=analyzers_failed,
-            analyzability_score=analyzability.score,
-            analyzability_details=analyzability.to_dict(),
-            scan_metadata=policy_meta,
-        )
-
-        return result
-
-    def _analyzability_findings(self, report: AnalyzabilityReport) -> list[Finding]:
-        """Generate findings when analyzability score is below acceptable thresholds.
-
-        Fail-closed: what the scanner cannot inspect should be flagged, not trusted.
-        """
-        findings: list[Finding] = []
-
-        # Escalate unknown binaries from INFO to MEDIUM — skip inert
-        # file types (images, fonts, databases) that are binary but benign.
-        _unanalyzable_enabled = "UNANALYZABLE_BINARY" not in self.policy.disabled_rules
-        _skip_inert = self.policy.file_classification.skip_inert_extensions
-        _inert_exts = set(self.policy.file_classification.inert_extensions) if _skip_inert else set()
-        _doc_indicators = set(self.policy.rule_scoping.doc_path_indicators)
-
-        for fd in report.file_details:
-            if not fd.is_analyzable and fd.skip_reason and "Binary file" in fd.skip_reason:
-                if not _unanalyzable_enabled:
-                    continue
-                ext = Path(fd.relative_path).suffix.lower()
-                # Skip inert extensions (images, fonts, etc.)
-                if _skip_inert and ext in _inert_exts:
-                    continue
-                # Skip files in test/fixture/doc directories
-                parts = Path(fd.relative_path).parts
-                if any(p.lower() in _doc_indicators for p in parts):
-                    continue
-                findings.append(
-                    Finding(
-                        id=f"UNANALYZABLE_BINARY_{fd.relative_path}",
-                        rule_id="UNANALYZABLE_BINARY",
-                        category=ThreatCategory.POLICY_VIOLATION,
-                        severity=Severity.MEDIUM,
-                        title="Unanalyzable binary file",
-                        description=(
-                            f"Binary file '{fd.relative_path}' cannot be inspected by the scanner. "
-                            f"Reason: {fd.skip_reason}. Binary files resist static analysis "
-                            f"and may contain hidden functionality."
-                        ),
-                        file_path=fd.relative_path,
-                        remediation=(
-                            "Replace binary files with source code, or submit the binary "
-                            "to VirusTotal for independent verification (--use-virustotal)."
-                        ),
-                        analyzer="analyzability",
-                        metadata={"skip_reason": fd.skip_reason, "weight": fd.weight},
-                    )
-                )
-
-        # Overall analyzability score findings — check policy knob
-        if "LOW_ANALYZABILITY" in self.policy.disabled_rules:
-            return findings  # early return; UNANALYZABLE_BINARY already collected above
-
-        if report.risk_level == "HIGH":
-            # < medium_threshold (default 70%) — critically low analyzability
-            findings.append(
-                Finding(
-                    id="LOW_ANALYZABILITY_CRITICAL",
-                    rule_id="LOW_ANALYZABILITY",
-                    category=ThreatCategory.POLICY_VIOLATION,
-                    severity=Severity.HIGH,
-                    title="Critically low analyzability score",
-                    description=(
-                        f"Only {report.score:.0f}% of skill content could be analyzed. "
-                        f"{report.unanalyzable_files} of {report.total_files} files are opaque "
-                        f"to the scanner. The safety assessment has low confidence."
-                    ),
-                    remediation=(
-                        "Replace opaque files (binaries, encrypted content) with "
-                        "inspectable source code to improve scan confidence."
-                    ),
-                    analyzer="analyzability",
-                    metadata={
-                        "score": round(report.score, 1),
-                        "unanalyzable_files": report.unanalyzable_files,
-                        "total_files": report.total_files,
-                        "risk_level": report.risk_level,
-                    },
-                )
-            )
-        elif report.risk_level == "MEDIUM":
-            # Between medium and low thresholds (default 70-90%)
-            findings.append(
-                Finding(
-                    id="LOW_ANALYZABILITY_MODERATE",
-                    rule_id="LOW_ANALYZABILITY",
-                    category=ThreatCategory.POLICY_VIOLATION,
-                    severity=Severity.MEDIUM,
-                    title="Moderate analyzability score",
-                    description=(
-                        f"Only {report.score:.0f}% of skill content could be analyzed. "
-                        f"{report.unanalyzable_files} of {report.total_files} files are opaque "
-                        f"to the scanner. Some content could not be verified as safe."
-                    ),
-                    remediation=("Review opaque files and replace with inspectable formats where possible."),
-                    analyzer="analyzability",
-                    metadata={
-                        "score": round(report.score, 1),
-                        "unanalyzable_files": report.unanalyzable_files,
-                        "total_files": report.total_files,
-                        "risk_level": report.risk_level,
-                    },
-                )
-            )
-
-        return findings
-
-    @staticmethod
-    def _build_enrichment_context(
-        skill: Skill,
-        findings: list[Finding],
-        unreferenced_scripts: list[str] | None = None,
-    ) -> bool:
-        """Check if there is meaningful enrichment context to pass to LLM analyzers."""
-        has_critical_or_high = any(f.severity in (Severity.CRITICAL, Severity.HIGH) for f in findings)
-        has_unreferenced = bool(unreferenced_scripts)
-        has_magic_mismatch = any(f.rule_id and "MAGIC" in (f.rule_id or "") for f in findings)
-        return has_critical_or_high or has_unreferenced or has_magic_mismatch
-
-    def _apply_severity_overrides(self, findings: list) -> None:
-        """Apply severity overrides from policy ``severity_overrides``."""
-        for finding in findings:
-            override = self.policy.get_severity_override(finding.rule_id)
-            if override:
-                try:
-                    finding.severity = Severity(override)
-                except (ValueError, KeyError):
-                    logger.warning("Invalid severity override '%s' for rule %s", override, finding.rule_id)
-
-    @staticmethod
-    def _normalize_snippet(snippet: str | None) -> str:
-        """Normalize snippets for stable dedupe keys."""
-        if not snippet:
-            return ""
-        lowered = snippet.lower()
-        collapsed = re.sub(r"\s+", " ", lowered).strip()
-        return collapsed[:240]
-
-    @staticmethod
-    def _severity_rank(severity: Severity) -> int:
-        order = {
-            Severity.CRITICAL: 5,
-            Severity.HIGH: 4,
-            Severity.MEDIUM: 3,
-            Severity.LOW: 2,
-            Severity.INFO: 1,
-            Severity.SAFE: 0,
-        }
-        return order.get(severity, 0)
-
-    def _analyzer_rank(self, name: str | None) -> int:
-        """Policy-driven analyzer precedence for same-issue collapse."""
-        if not name:
-            return 0
-        lower = name.lower()
-        prefs = [p.lower() for p in self.policy.finding_output.same_issue_preferred_analyzers]
-        for idx, token in enumerate(prefs):
-            if token and token in lower:
-                # Earlier entries in preference list should rank higher.
-                return len(prefs) - idx
-        return 0
-
-    def _normalize_findings(self, findings: list[Finding]) -> list[Finding]:
-        """Global final-stage finding de-duplication."""
-        fo = self.policy.finding_output
-        if not findings or (not fo.dedupe_exact_findings and not fo.dedupe_same_issue_per_location):
-            return findings
-
-        normalized = list(findings)
-
-        if fo.dedupe_exact_findings:
-            deduped_exact: list[Finding] = []
-            seen_exact: set[tuple[object, ...]] = set()
-            for f in normalized:
-                exact_key = (
-                    f.rule_id,
-                    f.category.value,
-                    f.severity.value,
-                    (f.file_path or "").lower(),
-                    int(f.line_number or 0),
-                    self._normalize_snippet(f.snippet),
-                    (f.analyzer or "").lower(),
-                )
-                if exact_key in seen_exact:
-                    continue
-                seen_exact.add(exact_key)
-                deduped_exact.append(f)
-            normalized = deduped_exact
-
-        if not fo.dedupe_same_issue_per_location:
-            return normalized
-
-        grouped: dict[tuple[object, ...], list[Finding]] = {}
-        passthrough: list[Finding] = []
-        for f in normalized:
-            file_key = (f.file_path or "").lower()
-            line_key = int(f.line_number or 0)
-            snippet_key = self._normalize_snippet(f.snippet)
-            # Only collapse when we have meaningful location/surface context.
-            has_location = bool(file_key) and (line_key > 0 or bool(snippet_key))
-            if not has_location:
-                passthrough.append(f)
-                continue
-            group_key = (file_key, line_key, snippet_key, f.category.value)
-            grouped.setdefault(group_key, []).append(f)
-
-        merged: list[Finding] = []
-        for group in grouped.values():
-            if len(group) == 1:
-                merged.append(group[0])
-                continue
-            analyzers_in_group = {(f.analyzer or "").lower() for f in group if (f.analyzer or "").strip()}
-            # Same-issue collapse is intended to remove overlap across analyzers.
-            # If all findings come from one analyzer, keep them as separate signals.
-            if len(analyzers_in_group) <= 1 and not fo.same_issue_collapse_within_analyzer:
-                merged.extend(
-                    sorted(
-                        group,
-                        key=lambda f: (
-                            self._severity_rank(f.severity) * -1,
-                            f.rule_id,
-                        ),
-                    )
-                )
-                continue
-            winner = max(
-                group,
-                key=lambda f: (
-                    self._analyzer_rank(f.analyzer),
-                    self._severity_rank(f.severity),
-                    f.rule_id,
-                ),
-            )
-            max_severity = max((f.severity for f in group), key=self._severity_rank)
-            if self._severity_rank(max_severity) > self._severity_rank(winner.severity):
-                winner.metadata["deduped_original_severity"] = winner.severity.value
-                winner.severity = max_severity
-
-            merged_rule_ids = sorted({f.rule_id for f in group if f.rule_id != winner.rule_id})
-            merged_analyzers = sorted(
-                {(f.analyzer or "") for f in group if (f.analyzer or "") != (winner.analyzer or "")}
-            )
-
-            # If preferred winner has no remediation, inherit the strongest
-            # available remediation from merged findings.
-            if not winner.remediation:
-                fallback = max(
-                    group,
-                    key=lambda f: (
-                        self._severity_rank(f.severity),
-                        self._analyzer_rank(f.analyzer),
-                        bool(f.remediation),
-                    ),
-                )
-                if fallback.remediation:
-                    winner.remediation = fallback.remediation
-
-            if merged_rule_ids:
-                winner.metadata["deduped_rule_ids"] = merged_rule_ids
-            if merged_analyzers:
-                winner.metadata["deduped_analyzers"] = merged_analyzers
-            winner.metadata["deduped_count"] = len(group) - 1
-            merged.append(winner)
-
-        # Preserve deterministic output order for stable benchmarks.
-        final = merged + passthrough
-        final.sort(
-            key=lambda f: (
-                (f.file_path or ""),
-                int(f.line_number or 0),
-                self._severity_rank(f.severity) * -1,
-                f.rule_id,
-            )
-        )
-        return final
-
-    @staticmethod
-    def _finding_rule_ids(finding: Finding) -> set[str]:
-        """Rule IDs represented by a finding, including merged dedupe aliases."""
-        rule_ids = {finding.rule_id}
-        deduped = finding.metadata.get("deduped_rule_ids")
-        if isinstance(deduped, list):
-            for rid in deduped:
-                if isinstance(rid, str) and rid:
-                    rule_ids.add(rid)
-        return rule_ids
-
-    def _annotate_same_path_rule_cooccurrence(self, findings: list[Finding]) -> None:
-        """Add metadata about other rules that triggered on the same file path."""
-        if not self.policy.finding_output.annotate_same_path_rule_cooccurrence:
-            return
-        if not findings:
-            return
-
-        grouped: dict[str, list[Finding]] = {}
-        for f in findings:
-            path = (f.file_path or "").strip()
-            if not path:
-                continue
-            grouped.setdefault(path.lower(), []).append(f)
-
-        for group in grouped.values():
-            if not group:
-                continue
-            path_rule_universe: set[str] = set()
-            for f in group:
-                path_rule_universe.update(self._finding_rule_ids(f))
-            if len(path_rule_universe) <= 1:
-                continue
-
-            sorted_universe = sorted(path_rule_universe)
-            for f in group:
-                other_rules = sorted(path_rule_universe - self._finding_rule_ids(f))
-                if not other_rules:
-                    continue
-                f.metadata["same_path_other_rule_ids"] = other_rules
-                f.metadata["same_path_unique_rule_count"] = len(sorted_universe)
-                f.metadata["same_path_findings_count"] = len(group)
-
-    def _policy_fingerprint_metadata(self) -> dict[str, str]:
-        """Build deterministic policy fingerprint metadata."""
-        payload = self.policy._to_dict()
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return {
-            "policy_name": self.policy.policy_name,
-            "policy_version": self.policy.policy_version,
-            "policy_preset_base": self.policy.preset_base,
-            "policy_fingerprint_sha256": digest,
-        }
-
-    def _annotate_findings_with_policy(self, findings: list[Finding], policy_meta: dict[str, str]) -> None:
-        """Attach scan-policy metadata to each finding (policy-controlled)."""
-        if not self.policy.finding_output.attach_policy_fingerprint:
-            return
-        for f in findings:
-            f.metadata.setdefault("scan_policy_name", policy_meta["policy_name"])
-            f.metadata.setdefault("scan_policy_version", policy_meta["policy_version"])
-            f.metadata.setdefault("scan_policy_preset_base", policy_meta["policy_preset_base"])
-            f.metadata.setdefault("scan_policy_fingerprint_sha256", policy_meta["policy_fingerprint_sha256"])
+        return self._execute_pipeline(skill, skill_directory)
 
     def scan_directory(
         self,
@@ -672,299 +130,700 @@ class SkillScanner:
         lenient: bool = False,
         max_workers: int = 1,
     ) -> Report:
+        """Analyse every skill package found under *skills_directory*.
+
+        Parameters
+        ----------
+        skills_directory:
+            Root directory to search for skill packages.
+        recursive:
+            Descend into sub-directories when looking for SKILL.md files.
+        check_overlap:
+            Run cross-skill description-similarity checks.
+        lenient:
+            Tolerate broken manifests.
+        max_workers:
+            Thread pool width.  ``1`` means sequential execution.
+
+        Returns
+        -------
+        Report
+            Combined report spanning all discovered skills.
         """
-        Scan all skill packages in a directory.
-
-        Uses the same two-phase analysis pipeline as ``scan_skill`` via the
-        shared ``_scan_single_skill`` helper, ensuring identical behaviour
-        (enrichment context, severity overrides, disabled rules, etc.).
-
-        Args:
-            skills_directory: Directory containing skill packages
-            recursive: If True, search recursively for SKILL.md files
-            check_overlap: If True, check for description overlap between skills
-            lenient: Tolerate malformed YAML / missing fields in skills.
-            max_workers: Number of parallel workers (1 = serial, >1 = threaded).
-
-        Returns:
-            Report with results from all skills
-        """
-        if not isinstance(skills_directory, Path):
-            skills_directory = Path(skills_directory)
+        skills_directory = Path(skills_directory) if not isinstance(skills_directory, Path) else skills_directory
 
         if not skills_directory.exists():
             raise FileNotFoundError(f"Directory does not exist: {skills_directory}")
 
-        skill_dirs = self._find_skill_directories(skills_directory, recursive)
+        dirs = self._locate_skill_roots(skills_directory, recursive)
         report = Report()
-
-        # Keep track of loaded skills for cross-skill analysis
-        loaded_skills: list[Skill] = []
+        collected_skills: list[Skill] = []
 
         if max_workers > 1:
-            self._scan_directory_parallel(
-                skill_dirs, report, loaded_skills, check_overlap, lenient, max_workers
-            )
+            self._process_dirs_threaded(dirs, report, collected_skills, check_overlap, lenient, max_workers)
         else:
-            self._scan_directory_serial(
-                skill_dirs, report, loaded_skills, check_overlap, lenient
-            )
+            self._process_dirs_sequential(dirs, report, collected_skills, check_overlap, lenient)
 
-        # Perform cross-skill analysis if requested
-        self._run_cross_skill_analysis(report, loaded_skills, check_overlap)
-
+        self._perform_cross_skill_checks(report, collected_skills, check_overlap)
         return report
 
-    def _scan_directory_serial(
+    def add_analyzer(self, analyzer: BaseAnalyzer):
+        """Register an additional analyzer in the pipeline."""
+        self.analyzers.append(analyzer)
+
+    def list_analyzers(self) -> list[str]:
+        """Return the names of all currently registered analyzers."""
+        return [a.get_name() for a in self.analyzers]
+
+    # ------------------------------------------------------------------
+    # Internal: full pipeline on a single loaded skill
+    # ------------------------------------------------------------------
+
+    def _execute_pipeline(self, skill: Skill, skill_directory: Path) -> ScanResult:
+        """Run every registered analyzer against *skill* and post-process results.
+
+        The pipeline has two phases.  Phase 1 runs deterministic (non-LLM)
+        analyzers.  Phase 2 feeds their output as contextual enrichment into
+        any LLM-backed analyzers.
+        """
+        t0 = time.time()
+
+        extraction = self.content_extractor.extract_skill_archives(skill.files)
+        if extraction.extracted_files:
+            skill.files.extend(extraction.extracted_files)
+
+        try:
+            collected: list[Finding] = list(extraction.findings)
+            used_analyzers: list[str] = []
+            failed_analyzers: list[dict[str, str]] = []
+            vt_validated: set[str] = set()
+            deferred_llm: list[BaseAnalyzer] = []
+            orphan_scripts: list[str] = []
+            llm_meta: dict[str, Any] = {}
+
+            # --- Phase 1: deterministic analyzers ---
+            for analyzer in self.analyzers:
+                if analyzer.get_name() in ("llm_analyzer", "meta_analyzer"):
+                    deferred_llm.append(analyzer)
+                    continue
+
+                phase1_findings = analyzer.analyze(skill)
+                collected.extend(phase1_findings)
+                used_analyzers.append(analyzer.get_name())
+
+                if hasattr(analyzer, "validated_binary_files"):
+                    vt_validated.update(analyzer.validated_binary_files)
+
+                if hasattr(analyzer, "get_unreferenced_scripts"):
+                    orphan_scripts = analyzer.get_unreferenced_scripts()
+
+            # --- Phase 2: LLM-backed analyzers (with enrichment) ---
+            if deferred_llm:
+                has_context = self._has_enrichment_signal(skill, collected, orphan_scripts)
+                for analyzer in deferred_llm:
+                    if hasattr(analyzer, "set_enrichment_context") and has_context:
+                        ext_counts: dict[str, int] = {}
+                        for sf in skill.files:
+                            ext_counts[sf.file_type] = ext_counts.get(sf.file_type, 0) + 1
+
+                        magic_issues = [
+                            f.file_path
+                            for f in collected
+                            if f.rule_id and "MAGIC" in f.rule_id and f.file_path
+                        ]
+                        top_static = [
+                            f"{f.rule_id}: {f.title}"
+                            for f in collected
+                            if f.severity in (Severity.CRITICAL, Severity.HIGH)
+                        ][:10]
+
+                        analyzer.set_enrichment_context(
+                            file_inventory={
+                                "total_files": len(skill.files),
+                                "types": ext_counts,
+                                "unreferenced_scripts": orphan_scripts,
+                            },
+                            magic_mismatches=magic_issues or None,
+                            static_findings_summary=top_static or None,
+                        )
+
+                    llm_findings = analyzer.analyze(skill)
+                    collected.extend(llm_findings)
+                    used_analyzers.append(analyzer.get_name())
+
+                    if hasattr(analyzer, "last_error") and analyzer.last_error:
+                        failed_analyzers.append({
+                            "analyzer": analyzer.get_name(),
+                            "error": analyzer.last_error,
+                        })
+
+                    if hasattr(analyzer, "last_overall_assessment"):
+                        llm_meta["llm_overall_assessment"] = analyzer.last_overall_assessment
+                        llm_meta["llm_primary_threats"] = getattr(analyzer, "last_primary_threats", [])
+
+            # --- Post-processing ---
+            # Suppress binary warnings for VT-validated files
+            if vt_validated:
+                collected = [
+                    f for f in collected
+                    if not (f.rule_id == "BINARY_FILE_DETECTED" and f.file_path in vt_validated)
+                ]
+
+            # Enforce globally disabled rules
+            if self.policy.disabled_rules:
+                collected = [f for f in collected if f.rule_id not in self.policy.disabled_rules]
+
+            self._override_severities(collected)
+
+            analyzability = compute_analyzability(skill, policy=self.policy)
+            collected.extend(self._emit_analyzability_findings(analyzability))
+
+            collected = self._deduplicate(collected)
+            self._tag_cooccurring_rules(collected)
+
+            scan_meta = self._compute_policy_digest()
+            if llm_meta:
+                scan_meta.update(llm_meta)
+            self._stamp_policy_on_findings(collected, scan_meta)
+
+        finally:
+            self.content_extractor.cleanup()
+
+        elapsed = time.time() - t0
+
+        return ScanResult(
+            skill_name=skill.name,
+            skill_directory=str(skill_directory.absolute()),
+            findings=collected,
+            scan_duration_seconds=elapsed,
+            analyzers_used=used_analyzers,
+            analyzers_failed=failed_analyzers,
+            analyzability_score=analyzability.score,
+            analyzability_details=analyzability.to_dict(),
+            scan_metadata=scan_meta,
+        )
+
+    # ------------------------------------------------------------------
+    # Analyzability -> Finding promotion
+    # ------------------------------------------------------------------
+
+    def _emit_analyzability_findings(self, report: AnalyzabilityReport) -> list[Finding]:
+        """Convert low-analyzability conditions into actionable findings.
+
+        Uninspectable content is flagged rather than silently trusted
+        (fail-closed posture).
+        """
+        out: list[Finding] = []
+
+        binary_rule_active = "UNANALYZABLE_BINARY" not in self.policy.disabled_rules
+        skip_inert = self.policy.file_classification.skip_inert_extensions
+        inert_set = set(self.policy.file_classification.inert_extensions) if skip_inert else set()
+        doc_markers = set(self.policy.rule_scoping.doc_path_indicators)
+
+        for fd in report.file_details:
+            if not (fd.is_analyzable is False and fd.skip_reason and "Binary file" in fd.skip_reason):
+                continue
+            if not binary_rule_active:
+                continue
+
+            ext = Path(fd.relative_path).suffix.lower()
+            if skip_inert and ext in inert_set:
+                continue
+
+            path_parts = Path(fd.relative_path).parts
+            if any(seg.lower() in doc_markers for seg in path_parts):
+                continue
+
+            out.append(Finding(
+                id=f"UNANALYZABLE_BINARY_{fd.relative_path}",
+                rule_id="UNANALYZABLE_BINARY",
+                category=ThreatCategory.POLICY_VIOLATION,
+                severity=Severity.MEDIUM,
+                title="Unanalyzable binary file",
+                description=(
+                    f"Binary file '{fd.relative_path}' cannot be inspected by the scanner. "
+                    f"Reason: {fd.skip_reason}. Binary files resist static analysis "
+                    f"and may contain hidden functionality."
+                ),
+                file_path=fd.relative_path,
+                remediation=(
+                    "Replace binary files with source code, or submit the binary "
+                    "to VirusTotal for independent verification (--use-virustotal)."
+                ),
+                analyzer="analyzability",
+                metadata={"skip_reason": fd.skip_reason, "weight": fd.weight},
+            ))
+
+        if "LOW_ANALYZABILITY" in self.policy.disabled_rules:
+            return out
+
+        if report.risk_level == "HIGH":
+            out.append(Finding(
+                id="LOW_ANALYZABILITY_CRITICAL",
+                rule_id="LOW_ANALYZABILITY",
+                category=ThreatCategory.POLICY_VIOLATION,
+                severity=Severity.HIGH,
+                title="Critically low analyzability score",
+                description=(
+                    f"Only {report.score:.0f}% of skill content could be analyzed. "
+                    f"{report.unanalyzable_files} of {report.total_files} files are opaque "
+                    f"to the scanner. The safety assessment has low confidence."
+                ),
+                remediation=(
+                    "Replace opaque files (binaries, encrypted content) with "
+                    "inspectable source code to improve scan confidence."
+                ),
+                analyzer="analyzability",
+                metadata={
+                    "score": round(report.score, 1),
+                    "unanalyzable_files": report.unanalyzable_files,
+                    "total_files": report.total_files,
+                    "risk_level": report.risk_level,
+                },
+            ))
+        elif report.risk_level == "MEDIUM":
+            out.append(Finding(
+                id="LOW_ANALYZABILITY_MODERATE",
+                rule_id="LOW_ANALYZABILITY",
+                category=ThreatCategory.POLICY_VIOLATION,
+                severity=Severity.MEDIUM,
+                title="Moderate analyzability score",
+                description=(
+                    f"Only {report.score:.0f}% of skill content could be analyzed. "
+                    f"{report.unanalyzable_files} of {report.total_files} files are opaque "
+                    f"to the scanner. Some content could not be verified as safe."
+                ),
+                remediation="Review opaque files and replace with inspectable formats where possible.",
+                analyzer="analyzability",
+                metadata={
+                    "score": round(report.score, 1),
+                    "unanalyzable_files": report.unanalyzable_files,
+                    "total_files": report.total_files,
+                    "risk_level": report.risk_level,
+                },
+            ))
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Enrichment helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_enrichment_signal(
+        skill: Skill,
+        findings: list[Finding],
+        orphan_scripts: list[str] | None = None,
+    ) -> bool:
+        """Decide whether Phase-1 output warrants enriching the LLM context."""
+        if any(f.severity in (Severity.CRITICAL, Severity.HIGH) for f in findings):
+            return True
+        if orphan_scripts:
+            return True
+        return any(f.rule_id and "MAGIC" in (f.rule_id or "") for f in findings)
+
+    # ------------------------------------------------------------------
+    # Severity overrides
+    # ------------------------------------------------------------------
+
+    def _override_severities(self, findings: list[Finding]) -> None:
+        """Apply per-rule severity overrides declared in the scan policy."""
+        for f in findings:
+            replacement = self.policy.get_severity_override(f.rule_id)
+            if replacement is None:
+                continue
+            try:
+                f.severity = Severity(replacement)
+            except (ValueError, KeyError):
+                _log.warning("Ignoring invalid severity override '%s' for rule %s", replacement, f.rule_id)
+
+    # ------------------------------------------------------------------
+    # Deduplication
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compact_snippet(snippet: str | None) -> str:
+        """Produce a normalised snippet suitable for dedup key construction."""
+        if not snippet:
+            return ""
+        return re.sub(r"\s+", " ", snippet.lower()).strip()[:240]
+
+    @staticmethod
+    def _sev_weight(severity: Severity) -> int:
+        """Map severity to a numeric weight for comparison."""
+        _weights = {
+            Severity.CRITICAL: 5, Severity.HIGH: 4, Severity.MEDIUM: 3,
+            Severity.LOW: 2, Severity.INFO: 1, Severity.SAFE: 0,
+        }
+        return _weights.get(severity, 0)
+
+    def _analyzer_priority(self, name: str | None) -> int:
+        """Compute policy-driven precedence for an analyzer name."""
+        if not name:
+            return 0
+        lower = name.lower()
+        preferred = [p.lower() for p in self.policy.finding_output.same_issue_preferred_analyzers]
+        for pos, token in enumerate(preferred):
+            if token and token in lower:
+                return len(preferred) - pos
+        return 0
+
+    def _deduplicate(self, findings: list[Finding]) -> list[Finding]:
+        """Remove exact and near-duplicate findings (controlled by policy)."""
+        cfg = self.policy.finding_output
+        if not findings or (not cfg.dedupe_exact_findings and not cfg.dedupe_same_issue_per_location):
+            return findings
+
+        result = list(findings)
+
+        # Pass 1: exact duplicates
+        if cfg.dedupe_exact_findings:
+            seen: set[tuple[object, ...]] = set()
+            unique: list[Finding] = []
+            for f in result:
+                key = (
+                    f.rule_id,
+                    f.category.value,
+                    f.severity.value,
+                    (f.file_path or "").lower(),
+                    int(f.line_number or 0),
+                    self._compact_snippet(f.snippet),
+                    (f.analyzer or "").lower(),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(f)
+            result = unique
+
+        if not cfg.dedupe_same_issue_per_location:
+            return result
+
+        # Pass 2: same-issue-per-location collapse
+        buckets: dict[tuple[object, ...], list[Finding]] = {}
+        ungrouped: list[Finding] = []
+        for f in result:
+            fp = (f.file_path or "").lower()
+            ln = int(f.line_number or 0)
+            snip = self._compact_snippet(f.snippet)
+            if fp and (ln > 0 or snip):
+                bucket_key = (fp, ln, snip, f.category.value)
+                buckets.setdefault(bucket_key, []).append(f)
+            else:
+                ungrouped.append(f)
+
+        collapsed: list[Finding] = []
+        for members in buckets.values():
+            if len(members) == 1:
+                collapsed.append(members[0])
+                continue
+
+            distinct_analyzers = {(f.analyzer or "").lower() for f in members if (f.analyzer or "").strip()}
+            if len(distinct_analyzers) <= 1 and not cfg.same_issue_collapse_within_analyzer:
+                members.sort(key=lambda f: (-self._sev_weight(f.severity), f.rule_id))
+                collapsed.extend(members)
+                continue
+
+            best = max(
+                members,
+                key=lambda f: (self._analyzer_priority(f.analyzer), self._sev_weight(f.severity), f.rule_id),
+            )
+            peak_sev = max((f.severity for f in members), key=self._sev_weight)
+            if self._sev_weight(peak_sev) > self._sev_weight(best.severity):
+                best.metadata["deduped_original_severity"] = best.severity.value
+                best.severity = peak_sev
+
+            extra_rules = sorted({f.rule_id for f in members if f.rule_id != best.rule_id})
+            extra_analyzers = sorted(
+                {(f.analyzer or "") for f in members if (f.analyzer or "") != (best.analyzer or "")}
+            )
+
+            if not best.remediation:
+                donor = max(
+                    members,
+                    key=lambda f: (self._sev_weight(f.severity), self._analyzer_priority(f.analyzer), bool(f.remediation)),
+                )
+                if donor.remediation:
+                    best.remediation = donor.remediation
+
+            if extra_rules:
+                best.metadata["deduped_rule_ids"] = extra_rules
+            if extra_analyzers:
+                best.metadata["deduped_analyzers"] = extra_analyzers
+            best.metadata["deduped_count"] = len(members) - 1
+            collapsed.append(best)
+
+        final = collapsed + ungrouped
+        final.sort(key=lambda f: (f.file_path or "", int(f.line_number or 0), -self._sev_weight(f.severity), f.rule_id))
+        return final
+
+    # ------------------------------------------------------------------
+    # Co-occurrence tagging
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _all_rule_ids(finding: Finding) -> set[str]:
+        """Collect every rule ID a finding represents, including dedup aliases."""
+        ids = {finding.rule_id}
+        merged = finding.metadata.get("deduped_rule_ids")
+        if isinstance(merged, list):
+            ids.update(rid for rid in merged if isinstance(rid, str) and rid)
+        return ids
+
+    def _tag_cooccurring_rules(self, findings: list[Finding]) -> None:
+        """Annotate each finding with other rules that fired on the same path."""
+        if not self.policy.finding_output.annotate_same_path_rule_cooccurrence:
+            return
+        if not findings:
+            return
+
+        by_path: dict[str, list[Finding]] = {}
+        for f in findings:
+            p = (f.file_path or "").strip()
+            if p:
+                by_path.setdefault(p.lower(), []).append(f)
+
+        for group in by_path.values():
+            all_ids: set[str] = set()
+            for f in group:
+                all_ids.update(self._all_rule_ids(f))
+            if len(all_ids) < 2:
+                continue
+            ordered = sorted(all_ids)
+            for f in group:
+                others = sorted(all_ids - self._all_rule_ids(f))
+                if others:
+                    f.metadata["same_path_other_rule_ids"] = others
+                    f.metadata["same_path_unique_rule_count"] = len(ordered)
+                    f.metadata["same_path_findings_count"] = len(group)
+
+    # ------------------------------------------------------------------
+    # Policy fingerprint and stamping
+    # ------------------------------------------------------------------
+
+    def _compute_policy_digest(self) -> dict[str, str]:
+        """Produce a deterministic hash identifying the active policy."""
+        raw = self.policy._serialize()
+        canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "policy_name": self.policy.policy_name,
+            "policy_version": self.policy.policy_version,
+            "policy_preset_base": self.policy.preset_base,
+            "policy_fingerprint_sha256": sha,
+        }
+
+    def _stamp_policy_on_findings(self, findings: list[Finding], meta: dict[str, str]) -> None:
+        """Embed policy traceability data into each finding when enabled."""
+        if not self.policy.finding_output.attach_policy_fingerprint:
+            return
+        for f in findings:
+            f.metadata.setdefault("scan_policy_name", meta["policy_name"])
+            f.metadata.setdefault("scan_policy_version", meta["policy_version"])
+            f.metadata.setdefault("scan_policy_preset_base", meta["policy_preset_base"])
+            f.metadata.setdefault("scan_policy_fingerprint_sha256", meta["policy_fingerprint_sha256"])
+
+    # ------------------------------------------------------------------
+    # Directory traversal helpers
+    # ------------------------------------------------------------------
+
+    def _locate_skill_roots(self, directory: Path, recursive: bool) -> list[Path]:
+        """Return directories that contain a SKILL.md manifest."""
+        if recursive:
+            return [p.parent for p in directory.rglob("SKILL.md")]
+
+        return [
+            child for child in directory.iterdir()
+            if child.is_dir() and (child / "SKILL.md").exists()
+        ]
+
+    def _process_dirs_sequential(
         self,
-        skill_dirs: list[Path],
+        dirs: list[Path],
         report: Report,
-        loaded_skills: list[Skill],
+        collected_skills: list[Skill],
         check_overlap: bool,
         lenient: bool,
     ) -> None:
-        """Scan skill directories sequentially."""
-        for skill_dir in skill_dirs:
+        """Walk *dirs* one at a time, appending results to *report*."""
+        for d in dirs:
             try:
-                skill = self.loader.load_skill(skill_dir, lenient=lenient)
-                result = self._scan_single_skill(skill, skill_dir)
-                report.add_scan_result(result)
-
+                skill = self.loader.load_skill(d, lenient=lenient)
+                report.add_scan_result(self._execute_pipeline(skill, d))
                 if check_overlap:
-                    loaded_skills.append(skill)
+                    collected_skills.append(skill)
+            except SkillLoadError as exc:
+                _log.warning("Could not load %s: %s", d, exc)
+                report.skills_skipped.append({"skill": str(d), "reason": str(exc)})
+            except Exception as exc:
+                _log.error("Unexpected failure scanning %s: %s", d, exc, exc_info=True)
+                report.skills_skipped.append({"skill": str(d), "reason": str(exc)})
 
-            except SkillLoadError as e:
-                logger.warning("Failed to load %s: %s", skill_dir, e)
-                report.skills_skipped.append({"skill": str(skill_dir), "reason": str(e)})
-            except Exception as e:
-                logger.error("Unexpected error scanning %s: %s", skill_dir, e, exc_info=True)
-                report.skills_skipped.append({"skill": str(skill_dir), "reason": str(e)})
-
-    def _scan_directory_parallel(
+    def _process_dirs_threaded(
         self,
-        skill_dirs: list[Path],
+        dirs: list[Path],
         report: Report,
-        loaded_skills: list[Skill],
+        collected_skills: list[Skill],
         check_overlap: bool,
         lenient: bool,
         max_workers: int,
     ) -> None:
-        """Scan skill directories in parallel using threads."""
-        report_lock = Lock()
+        """Scan *dirs* concurrently via a thread pool."""
+        mu = Lock()
 
-        def _scan_one(skill_dir: Path) -> None:
+        def _worker(skill_dir: Path) -> None:
             try:
-                loader = SkillLoader(max_file_size_bytes=self.policy.file_limits.max_loader_file_size_bytes)
-                skill = loader.load_skill(skill_dir, lenient=lenient)
-                result = self._scan_single_skill(skill, skill_dir)
-                with report_lock:
+                ldr = SkillLoader(max_file_size_bytes=self.policy.file_limits.max_loader_file_size_bytes)
+                skill = ldr.load_skill(skill_dir, lenient=lenient)
+                result = self._execute_pipeline(skill, skill_dir)
+                with mu:
                     report.add_scan_result(result)
                     if check_overlap:
-                        loaded_skills.append(skill)
-            except SkillLoadError as e:
-                logger.warning("Failed to load %s: %s", skill_dir, e)
-                with report_lock:
-                    report.skills_skipped.append({"skill": str(skill_dir), "reason": str(e)})
-            except Exception as e:
-                logger.error("Unexpected error scanning %s: %s", skill_dir, e, exc_info=True)
-                with report_lock:
-                    report.skills_skipped.append({"skill": str(skill_dir), "reason": str(e)})
+                        collected_skills.append(skill)
+            except SkillLoadError as exc:
+                _log.warning("Could not load %s: %s", skill_dir, exc)
+                with mu:
+                    report.skills_skipped.append({"skill": str(skill_dir), "reason": str(exc)})
+            except Exception as exc:
+                _log.error("Unexpected failure scanning %s: %s", skill_dir, exc, exc_info=True)
+                with mu:
+                    report.skills_skipped.append({"skill": str(skill_dir), "reason": str(exc)})
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_scan_one, sd) for sd in skill_dirs]
-            for future in as_completed(futures):
-                # Exceptions are already handled inside _scan_one,
-                # but catch any unexpected executor-level errors.
-                exc = future.exception()
-                if exc:
-                    logger.error("Worker thread failed unexpectedly: %s", exc)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_worker, d) for d in dirs]
+            for fut in as_completed(futures):
+                err = fut.exception()
+                if err:
+                    _log.error("Worker thread crashed: %s", err)
 
-    def _run_cross_skill_analysis(
+    # ------------------------------------------------------------------
+    # Cross-skill analysis
+    # ------------------------------------------------------------------
+
+    def _perform_cross_skill_checks(
         self,
         report: Report,
-        loaded_skills: list[Skill],
+        skills: list[Skill],
         check_overlap: bool,
     ) -> None:
-        """Run cross-skill overlap and pattern analysis if requested."""
-        overlap_findings: list[Finding] = []
-        cross_findings: list[Finding] = []
-        if check_overlap and len(loaded_skills) > 1:
+        """Detect inter-skill issues like description similarity and shared patterns."""
+        overlap: list[Finding] = []
+        pattern_findings: list[Finding] = []
+
+        if check_overlap and len(skills) > 1:
             try:
-                overlap_findings = self._check_description_overlap(loaded_skills)
-            except Exception as e:
-                logger.error("Cross-skill description overlap check failed: %s", e)
+                overlap = self._detect_description_similarity(skills)
+            except Exception as exc:
+                _log.error("Description similarity check failed: %s", exc)
 
             try:
                 from .analyzers.cross_skill_scanner import CrossSkillScanner
-
-                cross_analyzer = CrossSkillScanner()
-                cross_findings = cross_analyzer.analyze_skill_set(loaded_skills)
+                pattern_findings = CrossSkillScanner().analyze_skill_set(skills)
             except ImportError:
                 pass
-            except Exception as e:
-                logger.error("Cross-skill pattern detection failed: %s", e)
+            except Exception as exc:
+                _log.error("Cross-skill pattern analysis failed: %s", exc)
 
-        if overlap_findings or cross_findings:
-            all_cross_findings = list(overlap_findings or []) + list(cross_findings or [])
-            if all_cross_findings:
-                # Apply policy filters to cross-skill findings (mirrors _scan_single_skill lines 279-283)
-                if self.policy.disabled_rules:
-                    all_cross_findings = [f for f in all_cross_findings if f.rule_id not in self.policy.disabled_rules]
-                self._apply_severity_overrides(all_cross_findings)
-                report.add_cross_skill_findings(all_cross_findings)
+        combined = list(overlap) + list(pattern_findings)
+        if combined:
+            if self.policy.disabled_rules:
+                combined = [f for f in combined if f.rule_id not in self.policy.disabled_rules]
+            self._override_severities(combined)
+            report.add_cross_skill_findings(combined)
 
-    def _check_description_overlap(self, skills: list[Skill]) -> list[Finding]:
+    def _detect_description_similarity(self, skills: list[Skill]) -> list[Finding]:
+        """Flag skill pairs whose descriptions are suspiciously similar.
+
+        High similarity can enable trigger-hijacking where a rogue skill
+        intercepts requests meant for a legitimate one.
         """
-        Check for description overlap between skills.
+        results: list[Finding] = []
 
-        Similar descriptions could cause trigger hijacking where one skill
-        steals requests intended for another.
+        for idx in range(len(skills)):
+            for jdx in range(idx + 1, len(skills)):
+                sa, sb = skills[idx], skills[jdx]
+                sim = self._token_overlap_ratio(sa.description, sb.description)
 
-        Args:
-            skills: List of loaded skills to compare
+                if sim > 0.7:
+                    tag = hashlib.sha256((sa.name + sb.name).encode()).hexdigest()[:8]
+                    results.append(Finding(
+                        id=f"OVERLAP_{tag}",
+                        rule_id="TRIGGER_OVERLAP_RISK",
+                        category=ThreatCategory.SOCIAL_ENGINEERING,
+                        severity=Severity.MEDIUM,
+                        title="Skills have overlapping descriptions",
+                        description=(
+                            f"Skills '{sa.name}' and '{sb.name}' share {sim:.0%} "
+                            f"description similarity.  This could confuse routing "
+                            f"or enable trigger hijacking."
+                        ),
+                        file_path=f"{sa.name}/SKILL.md",
+                        remediation=(
+                            "Make skill descriptions more distinct by clearly specifying "
+                            "the unique capabilities, file types, or use cases for each skill."
+                        ),
+                        metadata={"skill_a": sa.name, "skill_b": sb.name, "similarity": sim},
+                    ))
+                elif sim > 0.5:
+                    tag = hashlib.sha256((sa.name + sb.name).encode()).hexdigest()[:8]
+                    results.append(Finding(
+                        id=f"OVERLAP_WARN_{tag}",
+                        rule_id="TRIGGER_OVERLAP_WARNING",
+                        category=ThreatCategory.SOCIAL_ENGINEERING,
+                        severity=Severity.LOW,
+                        title="Skills have somewhat similar descriptions",
+                        description=(
+                            f"Skills '{sa.name}' and '{sb.name}' share {sim:.0%} "
+                            f"description similarity.  Consider differentiating them."
+                        ),
+                        file_path=f"{sa.name}/SKILL.md",
+                        remediation="Consider making skill descriptions more distinct",
+                        metadata={"skill_a": sa.name, "skill_b": sb.name, "similarity": sim},
+                    ))
 
-        Returns:
-            List of findings for overlapping descriptions
-        """
-        findings = []
+        return results
 
-        for i, skill_a in enumerate(skills):
-            for skill_b in skills[i + 1 :]:
-                similarity = self._jaccard_similarity(skill_a.description, skill_b.description)
+    def _token_overlap_ratio(self, text_a: str, text_b: str) -> float:
+        """Compute Jaccard index between two texts after stop-word removal."""
+        words_a = set(re.findall(r"\b[a-zA-Z]+\b", str(text_a).lower())) - _TRIVIAL_TOKENS
+        words_b = set(re.findall(r"\b[a-zA-Z]+\b", str(text_b).lower())) - _TRIVIAL_TOKENS
 
-                if similarity > 0.7:
-                    digest = hashlib.sha256((skill_a.name + skill_b.name).encode()).hexdigest()[:8]
-                    findings.append(
-                        Finding(
-                            id=f"OVERLAP_{digest}",
-                            rule_id="TRIGGER_OVERLAP_RISK",
-                            category=ThreatCategory.SOCIAL_ENGINEERING,
-                            severity=Severity.MEDIUM,
-                            title="Skills have overlapping descriptions",
-                            description=(
-                                f"Skills '{skill_a.name}' and '{skill_b.name}' have {similarity:.0%} "
-                                f"similar descriptions. This may cause confusion about which skill "
-                                f"should handle a request, or enable trigger hijacking attacks."
-                            ),
-                            file_path=f"{skill_a.name}/SKILL.md",
-                            remediation=(
-                                "Make skill descriptions more distinct by clearly specifying "
-                                "the unique capabilities, file types, or use cases for each skill."
-                            ),
-                            metadata={
-                                "skill_a": skill_a.name,
-                                "skill_b": skill_b.name,
-                                "similarity": similarity,
-                            },
-                        )
-                    )
-                elif similarity > 0.5:
-                    digest = hashlib.sha256((skill_a.name + skill_b.name).encode()).hexdigest()[:8]
-                    findings.append(
-                        Finding(
-                            id=f"OVERLAP_WARN_{digest}",
-                            rule_id="TRIGGER_OVERLAP_WARNING",
-                            category=ThreatCategory.SOCIAL_ENGINEERING,
-                            severity=Severity.LOW,
-                            title="Skills have somewhat similar descriptions",
-                            description=(
-                                f"Skills '{skill_a.name}' and '{skill_b.name}' have {similarity:.0%} "
-                                f"similar descriptions. Consider making descriptions more distinct."
-                            ),
-                            file_path=f"{skill_a.name}/SKILL.md",
-                            remediation="Consider making skill descriptions more distinct",
-                            metadata={
-                                "skill_a": skill_a.name,
-                                "skill_b": skill_b.name,
-                                "similarity": similarity,
-                            },
-                        )
-                    )
-
-        return findings
-
-    def _jaccard_similarity(self, text_a: str, text_b: str) -> float:
-        """
-        Calculate Jaccard similarity between two text strings.
-
-        Args:
-            text_a: First text
-            text_b: Second text
-
-        Returns:
-            Similarity score from 0.0 to 1.0
-        """
-        tokens_a = set(re.findall(r"\b[a-zA-Z]+\b", str(text_a).lower()))
-        tokens_b = set(re.findall(r"\b[a-zA-Z]+\b", str(text_b).lower()))
-
-        # Remove common stop words (using module-level constant)
-        tokens_a = tokens_a - _STOP_WORDS
-        tokens_b = tokens_b - _STOP_WORDS
-
-        if not tokens_a or not tokens_b:
+        if not words_a or not words_b:
             return 0.0
 
-        intersection = len(tokens_a & tokens_b)
-        union = len(tokens_a | tokens_b)
+        shared = len(words_a & words_b)
+        total = len(words_a | words_b)
+        return shared / total if total else 0.0
 
-        return intersection / union if union > 0 else 0.0
 
-    def _find_skill_directories(self, directory: Path, recursive: bool) -> list[Path]:
-        """
-        Find all directories containing SKILL.md files.
-
-        Args:
-            directory: Directory to search
-            recursive: Search recursively
-
-        Returns:
-            List of skill directory paths
-        """
-        skill_dirs = []
-
-        if recursive:
-            for skill_md in directory.rglob("SKILL.md"):
-                skill_dirs.append(skill_md.parent)
-        else:
-            for item in directory.iterdir():
-                if item.is_dir():
-                    skill_md = item / "SKILL.md"
-                    if skill_md.exists():
-                        skill_dirs.append(item)
-
-        return skill_dirs
-
-    def add_analyzer(self, analyzer: BaseAnalyzer):
-        """Add an analyzer to the scanner."""
-        self.analyzers.append(analyzer)
-
-    def list_analyzers(self) -> list[str]:
-        """Get names of all configured analyzers."""
-        return [analyzer.get_name() for analyzer in self.analyzers]
-
+# ======================================================================
+# Module-level convenience wrappers
+# ======================================================================
 
 def scan_skill(
     skill_directory: str | Path,
     analyzers: list[BaseAnalyzer] | None = None,
     policy: ScanPolicy | None = None,
 ) -> ScanResult:
-    """
-    Convenience function to scan a single skill.
+    """Shorthand for constructing a `SkillScanner` and scanning one skill.
 
-    Args:
-        skill_directory: Path to skill directory
-        analyzers: Optional list of analyzers
-        policy: Optional scan policy. If omitted and analyzers are provided,
-            the policy from the first analyzer is used when available.
+    Parameters
+    ----------
+    skill_directory:
+        Path to the skill package.
+    analyzers:
+        Optional explicit analyzer list.
+    policy:
+        Optional scan policy.  When *None* and *analyzers* are given,
+        the policy attached to the first analyzer is used if available.
 
-    Returns:
-        ScanResult
+    Returns
+    -------
+    ScanResult
     """
-    scanner_policy = policy
-    if scanner_policy is None and analyzers:
-        scanner_policy = getattr(analyzers[0], "policy", None)
-    scanner = SkillScanner(analyzers=analyzers, policy=scanner_policy)
-    return scanner.scan_skill(skill_directory)
+    effective_policy = policy
+    if effective_policy is None and analyzers:
+        effective_policy = getattr(analyzers[0], "policy", None)
+    return SkillScanner(analyzers=analyzers, policy=effective_policy).scan_skill(skill_directory)
 
 
 def scan_directory(
@@ -975,25 +834,31 @@ def scan_directory(
     policy: ScanPolicy | None = None,
     max_workers: int = 1,
 ) -> Report:
-    """
-    Convenience function to scan multiple skills.
+    """Shorthand for constructing a `SkillScanner` and scanning a directory tree.
 
-    Args:
-        skills_directory: Directory containing skills
-        recursive: Search recursively
-        analyzers: Optional list of analyzers
-        check_overlap: If True, check for description overlap between skills
-        policy: Optional scan policy. If omitted and analyzers are provided,
-            the policy from the first analyzer is used when available.
-        max_workers: Number of parallel workers (1 = serial, >1 = threaded).
+    Parameters
+    ----------
+    skills_directory:
+        Root directory containing skill packages.
+    recursive:
+        Recurse into sub-directories.
+    analyzers:
+        Optional explicit analyzer list.
+    check_overlap:
+        Run inter-skill description similarity checks.
+    policy:
+        Optional scan policy.
+    max_workers:
+        Thread pool width (``1`` = sequential).
 
-    Returns:
-        Report with all results
+    Returns
+    -------
+    Report
     """
-    scanner_policy = policy
-    if scanner_policy is None and analyzers:
-        scanner_policy = getattr(analyzers[0], "policy", None)
-    scanner = SkillScanner(analyzers=analyzers, policy=scanner_policy)
+    effective_policy = policy
+    if effective_policy is None and analyzers:
+        effective_policy = getattr(analyzers[0], "policy", None)
+    scanner = SkillScanner(analyzers=analyzers, policy=effective_policy)
     return scanner.scan_directory(
-        skills_directory, recursive=recursive, check_overlap=check_overlap, max_workers=max_workers
+        skills_directory, recursive=recursive, check_overlap=check_overlap, max_workers=max_workers,
     )
