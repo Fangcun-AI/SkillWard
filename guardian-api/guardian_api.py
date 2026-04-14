@@ -315,12 +315,12 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
 
         _t_llm_start = time.time()
         try:
-            from guardian import _read_skill_files, _format_static_findings, _LLM_TRIAGE_PROMPT
+            from guardian import _read_skill_files, _format_static_findings, _LLM_TRIAGE_SYSTEM, _LLM_TRIAGE_USER
             import litellm
 
             skill_content, code_files = _read_skill_files(skill_data["skill_path"])
             static_summary = _format_static_findings(skill_data["findings"])
-            prompt = _LLM_TRIAGE_PROMPT.format(
+            user_prompt = _LLM_TRIAGE_USER.format(
                 skill_content=skill_content,
                 code_files=code_files,
                 static_findings=static_summary,
@@ -337,15 +337,23 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
 
             response = await litellm.acompletion(
                 model=llm_model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": _LLM_TRIAGE_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ],
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=4000,
                 **extra,
             )
             raw = response.choices[0].message.content.strip()
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
             if raw.startswith("```"):
                 raw = re.sub(r'^```(?:json)?\s*', '', raw)
                 raw = re.sub(r'\s*```$', '', raw)
+            if not raw.startswith("{"):
+                m = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+                if m:
+                    raw = m.group(0)
             result = json.loads(raw)
             score = max(0.0, min(1.0, float(result.get("safety_confidence", 0.0))))
             triage = {"safety_confidence": score, "reason": result.get("reason", ""), "reason_en": result.get("reason_en", "")}
@@ -1743,12 +1751,12 @@ async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: b
     if use_llm:
         _t0 = time.time()
         try:
-            from guardian import _read_skill_files, _format_static_findings, _LLM_TRIAGE_PROMPT
+            from guardian import _read_skill_files, _format_static_findings, _LLM_TRIAGE_SYSTEM, _LLM_TRIAGE_USER
             import litellm
 
             skill_content, code_files = _read_skill_files(skill_data["skill_path"])
             static_summary = _format_static_findings(skill_data["findings"])
-            prompt = _LLM_TRIAGE_PROMPT.format(
+            user_prompt = _LLM_TRIAGE_USER.format(
                 skill_content=skill_content,
                 code_files=code_files,
                 static_findings=static_summary,
@@ -1763,15 +1771,23 @@ async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: b
 
             response = await litellm.acompletion(
                 model=settings.llm_model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": _LLM_TRIAGE_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ],
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=4000,
                 **extra,
             )
             raw = response.choices[0].message.content.strip()
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
             if raw.startswith("```"):
                 raw = re.sub(r'^```(?:json)?\s*', '', raw)
                 raw = re.sub(r'\s*```$', '', raw)
+            if not raw.startswith("{"):
+                m = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+                if m:
+                    raw = m.group(0)
             parsed = json.loads(raw)
             safety_confidence = max(0.0, min(1.0, float(parsed.get("safety_confidence", 0.0))))
             llm_reason = parsed.get("reason", "")
