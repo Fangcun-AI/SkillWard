@@ -1,22 +1,4 @@
-# Copyright 2026 FangcunGuard
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
-"""
-Base analyzer interface for skill security scanning.
-"""
+"""Abstract interface that every security analyzer must implement."""
 
 from __future__ import annotations
 
@@ -27,33 +9,15 @@ from ..scan_policy import ScanPolicy
 
 
 class BaseAnalyzer(ABC):
-    """Abstract base class for all security analyzers."""
+    """Common contract for pluggable analyzers in the scanning pipeline."""
 
     def __init__(self, name: str, policy: ScanPolicy | None = None):
-        """
-        Initialize analyzer.
-
-        Args:
-            name: Name of the analyzer
-            policy: Scan policy for org-specific allowlists and rule scoping.
-                If None, loads built-in defaults.
-        """
         self.name = name
         self.policy = policy or ScanPolicy.default()
 
     @abstractmethod
     def analyze(self, skill: Skill) -> list[Finding]:
-        """
-        Analyze a skill for security issues.
-
-        Args:
-            skill: The skill to analyze
-
-        Returns:
-            List of security findings
-        """
-        pass
+        """Inspect *skill* and return any security findings."""
 
     def get_name(self) -> str:
-        """Get the analyzer name."""
         return self.name

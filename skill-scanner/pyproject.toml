@@ -1,130 +1,33 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "fangcun-ai-skill-scanner"
+name = "skillward-scanner"
 version = "0.1.0"
-description = "Security scanner for Agent Skills packages - Detects prompt injection, data exfiltration, and malicious code"
-authors = [
-    {name = "FangcunGuard"},
-]
-readme = "README.md"
+description = "Static analysis engine for AI Agent Skill packages"
+readme = {text = "", content-type = "text/plain"}
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Information Technology",
     "Topic :: Security",
-    "Topic :: Software Development :: Quality Assurance",
-    "Topic :: Software Development :: Testing",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
-    "Environment :: Console",
-    "Typing :: Typed",
-]
-keywords = [
-    "security",
-    "claude",
-    "skills",
-    "codex",
-    "scanner",
-    "threat-detection",
-    "prompt-injection",
-    "ai-security",
-    "anthropic",
-    "openai",
-    "static-analysis",
-    "llm-security",
-    "mcp"
 ]
 
 dependencies = [
     "PyYAML>=6.0.1",
     "python-frontmatter>=1.0.0",
-    "click>=8.1.0",
-    "rich>=13.0.0",
-    "textual>=1.0.0",
-    "tabulate>=0.9.0",
-    "pydantic>=2.6.0",
-    "fastapi>=0.125.0",
-    "uvicorn[standard]>=0.29.0",
-    "python-multipart>=0.0.6",
     "yara-x>=1.12.0",
-    "python-dotenv>=1.0.0",
-    "httpx>=0.28.1",
-    # AI-powered file type detection (200+ types, ~99% accuracy)
     "magika>=0.6.0",
-    # Structural PDF analysis (detects JS, OpenAction, Launch, etc.)
     "pdfid>=1.1.0",
-    # Office document macro/VBA detection (oleid + olevba)
     "oletools>=0.60.1",
-    # Unicode homoglyph attack detection (confusables.txt backed)
     "confusable-homoglyphs>=3.3.0",
-    # LLM support (required)
-    "anthropic>=0.40.0",
-    "openai>=1.0.0",
-    "litellm>=1.77.0",
-    "google-genai>=0.2.0",
-    "google-generativeai>=0.8.0",
 ]
 
-[project.optional-dependencies]
-# AWS Bedrock support (requires boto3 for IAM credentials)
-bedrock = [
-    "boto3>=1.28.57",
-]
-# Google Vertex AI support
-vertex = [
-    "google-cloud-aiplatform>=1.38.0",
-]
-# Azure OpenAI support (for managed identity auth)
-azure = [
-    "azure-identity>=1.15.0",
-]
-# Supply chain dependency scanning (requires network access)
-# NOTE: guarddog has a dependency conflict with pip-audit via tomli.
-# Install separately: pip install guarddog
-# supply-chain = ["guarddog>=2.0.0"]
-# All optional provider extras
-all = [
-    "boto3>=1.28.57",
-    "google-cloud-aiplatform>=1.38.0",
-    "azure-identity>=1.15.0",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.1",
-    "pytest-cov>=6.2.1",
-    "pytest-asyncio>=1.0.0",
-    "ruff>=0.14.0",
-    "mypy>=1.8.0",
-    "pre-commit>=4.5.0",
-    "liccheck>=0.9.2",
-    "pip-audit>=2.10.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/fangcunguard/skill-scanner"
-Documentation = "https://github.com/fangcunguard/skill-scanner#readme"
-Repository = "https://github.com/fangcunguard/skill-scanner"
-Issues = "https://github.com/fangcunguard/skill-scanner/issues"
-Changelog = "https://github.com/fangcunguard/skill-scanner/releases"
-
-[project.scripts]
-skill-scanner = "skill_scanner.cli.cli:main"
-skill-scanner-api = "skill_scanner.api.api_cli:main"
-skill-scanner-pre-commit = "skill_scanner.hooks.pre_commit:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["skill_scanner"]
+[tool.setuptools.packages.find]
+include = ["skill_scanner*"]
 
 [tool.ruff]
 line-length = 120
@@ -133,91 +36,3 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501", "F401", "F841", "B904", "B006", "B007", "B008", "B023"]
-
-[tool.ruff.lint.extend-per-file-ignores]
-"tests/*.py" = ["B", "E"]
-"evals/*.py" = ["B", "E"]
-"examples/*.py" = ["B", "E"]
-"skill_scanner/_version.py" = ["I", "UP"]
-
-[tool.mypy]
-python_version = "3.12"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-check_untyped_defs = true
-disallow_untyped_decorators = false
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
-exclude = ["evals/", "tests/", "examples/"]
-
-[[tool.mypy.overrides]]
-module = ["yaml.*", "tabulate.*", "requests.*", "yara.*", "frontmatter.*", "litellm.*", "anthropic.*", "openai.*", "google.*", "httpx.*", "decompyle3.*", "uncompyle6.*"]
-ignore_missing_imports = true
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short --maxfail=1"
-filterwarnings = [
-    "ignore:Pydantic serializer warnings:UserWarning:pydantic.*",
-]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests that hit external services (run with -m integration)",
-    "requires_llm: marks tests that require LLM API keys",
-    "e2e: marks end-to-end tests (CLI subprocess + full scan chain)",
-]
-
-[tool.coverage.run]
-source = ["skill_scanner"]
-omit = [
-    "*/tests/*",
-    "*/test_*",
-    "*/__pycache__/*",
-    "*/venv/*",
-]
-
-[tool.coverage.report]
-precision = 2
-show_missing = true
-skip_covered = false
-
-[tool.liccheck]
-authorized_licenses = [
-    "MIT",
-    "MIT License",
-    "BSD",
-    "BSD License",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "Apache 2.0",
-    "Apache License 2.0",
-    "Apache Software License",
-    "Apache-2.0",
-    "ISC",
-    "ISC License",
-    "LGPL",
-    "PSF",
-    "Python Software Foundation License",
-    "Mozilla Public License 2.0 (MPL 2.0)",
-    "MPL-2.0",
-    "Unlicense",
-    "CC0-1.0",
-    "Public Domain",
-]
-unauthorized_licenses = [
-    "GPL",
-    "GPLv2",
-    "GPLv3",
-    "GNU General Public License v2 (GPLv2)",
-    "GNU General Public License v3 (GPLv3)",
-]
