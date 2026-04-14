@@ -80,6 +80,8 @@ An in-container Agent executes the Skill end-to-end, with a custom Guard monitor
 
 ## SkillWard UI
 
+> **Try it online:** [skillward.fangcunleap.com](https://skillward.fangcunleap.com/)
+
 SkillWard UI provides a clean, intuitive web interface, supporting single or batch Skill submission, three scan modes (Quick Scan / Sandbox Scan / Deep Trace), and comprehensive scan results display.
 
 <table>

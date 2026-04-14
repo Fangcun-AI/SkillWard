@@ -80,6 +80,8 @@ SkillWard 采用静态+动态的三阶段分析方法：
 
 ## 可视化界面
 
+> **在线体验：** [skillward.fangcunleap.com](https://skillward.fangcunleap.com/)
+
 SkillWard UI 提供简洁直观的 Web 界面，支持单个或批量 Skill 提交、三种扫描模式（快速扫描 / 沙箱检测 / 深度追踪）、以及完整的扫描结果展示。
 
 <table>
