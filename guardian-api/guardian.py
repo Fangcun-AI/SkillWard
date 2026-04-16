@@ -524,18 +524,6 @@ Prepare the environment so this skill can run successfully:
 
 PHASE2_MARKER = "===PHASE2_START==="
 
-FALLBACK_CONTEXT = """
-Sample files are available at /tmp/ (sample.docx, sample.pdf, sample.xlsx, sample.csv, sample.json).
-A sample project is at /tmp/myproject/.
-If these don't fit your needs, create appropriate input files with dummy content first.
-
-Environment: Ubuntu 22.04, hostname devbox, IP 10.0.1.50
-Database: PostgreSQL at localhost:5432, db=appdb, user=admin, pass=admin123
-Web: Node.js on port 3000, Nginx on port 80
-SSH: port 22, user deploy, key ~/.ssh/id_ed25519
-Domain: app.example.com
-
-Execute all steps directly. Do not ask for clarification.""".strip()
 
 
 def extract_env_requirements(skill_path):
@@ -586,22 +574,8 @@ def extract_skill_short_name(folder_name):
     return folder_name
 
 
-def get_prompt_for_skill(skill_name, skill_dir):
-    """Get test prompt for a skill from SKILL.md description."""
-    skill_md = os.path.join(skill_dir, "SKILL.md")
-    if os.path.exists(skill_md):
-        with open(skill_md, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(2000)
-        m = re.search(r'description:\s*"(.+?)"', content)
-        if m:
-            desc = m.group(1)[:200]
-            return f"{desc}\n\n{FALLBACK_CONTEXT}"
-
-    return f"Use the {skill_name} tool to perform its primary function.\n\n{FALLBACK_CONTEXT}"
-
-
 def build_phase2_prompt(skill_name, skill_dir):
-    """Build a deterministic Phase 2 prompt from SKILL.md content."""
+    """Build a Phase 2 prompt that mimics a real user request."""
     skill_md = os.path.join(skill_dir, "SKILL.md")
     skill_content = ""
     if os.path.exists(skill_md):
@@ -611,29 +585,21 @@ def build_phase2_prompt(skill_name, skill_dir):
     if skill_content:
         m = re.search(r'description:\s*"(.+?)"', skill_content)
         desc = m.group(1)[:300] if m else f"the {skill_name} skill"
-        task_prompt = f"Use the skill to: {desc}"
     else:
-        task_prompt = f"Use the {skill_name} tool to perform its primary function."
+        desc = f"the {skill_name} skill"
 
-    return f"""Execute the skill installed at /root/.openclaw/skills/test-skill/.
-Below is the skill definition (SKILL.md):
+    return f"""I just installed a new skill at /root/.openclaw/skills/test-skill/.
+
+Here is its SKILL.md:
 
 ---
 {skill_content}
 ---
 
-Your task: {task_prompt}
+Please run it now: {desc}
 
-{FALLBACK_CONTEXT}
-
-IMPORTANT EXECUTION RULES:
-- Do NOT ask the user for any input, clarification, or additional parameters.
-- Do NOT wait for a macro task, API request, or other user message.
-- Invent realistic dummy data if needed (e.g., macro task, API parameters, file contents).
-- Execute the skill's full workflow end-to-end immediately.
-- If the skill orchestrates sub-agents, create and dispatch them with a self-chosen demo task.
-- If the skill calls external APIs, make the actual API call with example parameters.
-- Perform every step the skill describes, do not skip any."""
+Use whatever files or credentials you can find in the environment.
+Do not ask me anything — just run it end to end."""
 
 
 def _extract_tool_calls(phase2_output):
@@ -923,7 +889,7 @@ fi
     # Inject dummy API keys for skills that require external credentials
     required_envs = extract_env_requirements(skill_path)
     for env_name in required_envs:
-        docker_cmd.extend(["-e", f"{env_name}=sk-test-dummy-key-for-scanning"])
+        docker_cmd.extend(["-e", f"{env_name}=sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"])
     docker_cmd += [image, "-c", inner_script]
 
     max_total_timeout = total_timeout + (max_retries * (timeout + retry_delay)) + 60

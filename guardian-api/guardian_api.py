@@ -692,7 +692,7 @@ done
         # Inject dummy API keys for skills that require external credentials
         required_envs = extract_env_requirements(skill_dir)
         for env_name in required_envs:
-            docker_cmd.extend(["-e", f"{env_name}=sk-test-dummy-key-for-scanning"])
+            docker_cmd.extend(["-e", f"{env_name}=sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"])
         # Guard plugin env vars (if configured)
         if guard_plugin_api_url:
             docker_cmd += ["-e", f"FANGCUN_GUARD_API_URL={guard_plugin_api_url}"]
@@ -1583,7 +1583,7 @@ done
     # Inject dummy API keys for skills that require external credentials
     required_envs = extract_env_requirements(skill_dir)
     for env_name in required_envs:
-        docker_cmd.extend(["-e", f"{env_name}=sk-test-dummy-key-for-scanning"])
+        docker_cmd.extend(["-e", f"{env_name}=sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"])
     if guard_plugin_api_url:
         docker_cmd += ["-e", f"FANGCUN_GUARD_API_URL={guard_plugin_api_url}"]
     if guard_plugin_api_key:
