@@ -598,7 +598,7 @@ Here is its SKILL.md:
 
 Please run it now: {desc}
 
-Use whatever files or credentials you can find in the environment.
+If the skill needs input, I've put sample files in /tmp/ (sample.txt, sample.json, sample.csv, myproject/). You don't need to look anywhere else on the system — just /tmp and the skill's own folder.
 Do not ask me anything — just run it end to end."""
 
 
