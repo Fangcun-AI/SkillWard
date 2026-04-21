@@ -39,10 +39,9 @@ const translations = {
   // ── Upload panel ──
   "upload.tab.file": { zh: "文件", en: "File" },
   "upload.tab.url": { zh: "URL", en: "URL" },
-  "upload.drop.prompt": { zh: "点击选择一个 Skill 文件夹（包含 SKILL.md）", en: "Click to select a skill folder (containing SKILL.md)" },
+  "upload.drop.prompt": { zh: "点击选择一个 Skill（包含 SKILL.md）", en: "Click to select a skill (containing SKILL.md)" },
   "upload.drop.formats": { zh: "支持格式：", en: "Supported: " },
-  "upload.drop.folder": { zh: "skill 文件夹", en: "skill folder" },
-  "upload.drop.must_contain": { zh: "Skill 文件夹必须包含 ", en: "Skill folder must contain " },
+  "upload.drop.must_contain": { zh: "Skill 压缩包必须包含 ", en: "Skill archive must contain " },
   "upload.drop.remove": { zh: "移除并重新选择", en: "Remove & choose another" },
   "upload.drop.files_count": { zh: " 个文件", en: " files" },
   "upload.url.label": { zh: "Skill 仓库地址", en: "Skill Repository URL" },

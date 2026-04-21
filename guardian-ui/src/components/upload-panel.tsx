@@ -186,7 +186,7 @@ export function UploadPanel({ onSubmit, isScanning, onScanModeChange }: UploadPa
                   </div>
                   <p className="text-sm text-stone-500 mb-3">{t("upload.drop.prompt")}</p>
                   <p className="text-xs text-stone-400 font-mono">
-                    {t("upload.drop.formats")}<span className="text-stone-600">{t("upload.drop.folder")}</span> · <span className="text-stone-600">.zip</span> · <span className="text-stone-600">.tar.gz</span> · <span className="text-stone-600">.tgz</span>
+                    {t("upload.drop.formats")}<span className="text-stone-600">.zip</span> · <span className="text-stone-600">.tar.gz</span> · <span className="text-stone-600">.tgz</span>
                   </p>
                   <p className="text-xs text-stone-400 mt-1">
                     {t("upload.drop.must_contain")}<span className="text-cyan-700 font-bold">SKILL.md</span>
