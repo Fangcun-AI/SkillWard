@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { useI18n, LanguageToggle } from "@/lib/i18n";
@@ -29,6 +29,12 @@ export default function HistoryPage() {
   const { t } = useI18n();
   const [records, setRecords] = useState<ScanRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(true);
+  const offsetRef = useRef(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 50;
+  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   const VERDICT_CONFIG: Record<string, { label: string; bg: string; text: string; border: string }> = {
     BLOCKED: { label: t("history.verdict.danger"), bg: "bg-red-50", text: "text-red-600", border: "border-red-200" },
@@ -36,6 +42,17 @@ export default function HistoryPage() {
     PASSED: { label: t("history.verdict.safe"), bg: "bg-emerald-50", text: "text-emerald-600", border: "border-emerald-200" },
     TIMEOUT: { label: t("history.verdict.timeout"), bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200" },
     ERROR: { label: t("history.verdict.error"), bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200" },
+    WARNING: { label: t("history.verdict.warn"), bg: "bg-amber-50", text: "text-amber-600", border: "border-amber-200" },
+    DANGER: { label: t("history.verdict.danger"), bg: "bg-red-50", text: "text-red-600", border: "border-red-200" },
+    SAFE: { label: t("history.verdict.safe"), bg: "bg-emerald-50", text: "text-emerald-600", border: "border-emerald-200" },
+    UNSAFE: { label: t("history.verdict.danger"), bg: "bg-red-50", text: "text-red-600", border: "border-red-200" },
+    INCONCLUSIVE: { label: t("history.verdict.timeout"), bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200" },
+    // New unified terminology (Safe / Medium Risk / High Risk) — produced by refactored guardian.py
+    "Safe": { label: t("history.verdict.safe"), bg: "bg-emerald-50", text: "text-emerald-600", border: "border-emerald-200" },
+    "Medium Risk": { label: t("history.verdict.warn"), bg: "bg-amber-50", text: "text-amber-600", border: "border-amber-200" },
+    "High Risk": { label: t("history.verdict.danger"), bg: "bg-red-50", text: "text-red-600", border: "border-red-200" },
+    INCOMPLETE: { label: t("history.verdict.timeout"), bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200" },
+    SANDBOX_FAILED: { label: t("history.verdict.error"), bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200" },
   };
 
   function getVerdictConfig(verdict: string) {
@@ -72,44 +89,67 @@ export default function HistoryPage() {
     return tags.slice(0, 4);
   }
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/scan/history?limit=200`)
+  const fetchPage = useCallback((currentOffset: number, append: boolean) => {
+    if (append) setLoadingMore(true);
+    fetch(`${API_BASE}/api/scan/history?limit=${PAGE_SIZE}&offset=${currentOffset}`)
       .then((res) => res.json())
       .then((data) => {
-        // Support both old array format and new paginated format
         const list = Array.isArray(data) ? data : (data.records || []);
-        setRecords(list);
+        const serverTotal = data.total ?? list.length;
+        setTotal(serverTotal);
+        if (append) {
+          setRecords((prev) => [...prev, ...list]);
+        } else {
+          setRecords(list);
+        }
+        setHasMore(currentOffset + list.length < serverTotal);
         setLoading(false);
+        setLoadingMore(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => { setLoading(false); setLoadingMore(false); });
   }, []);
+
+  const loadMore = useCallback(() => {
+    if (loadingMore || !hasMore) return;
+    offsetRef.current += PAGE_SIZE;
+    fetchPage(offsetRef.current, true);
+  }, [loadingMore, hasMore, fetchPage]);
+
+  useEffect(() => {
+    fetchPage(0, false);
+  }, [fetchPage]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (loadingMore || !hasMore) return;
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const docHeight = document.documentElement.scrollHeight;
+      if (docHeight - scrollBottom < 300) {
+        loadMore();
+      }
+    };
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, [hasMore, loadingMore, loadMore]);
 
   return (
     <div className="min-h-screen bg-warm flex flex-col">
       {/* Nav */}
       <nav className="shrink-0">
-        <div className="accent-line" />
-        <div className="nav-dark">
+        <div className="nav-light bg-white/90 backdrop-blur-sm border-b border-stone-200">
           <div className="max-w-7xl mx-auto px-8 h-14 flex items-center justify-between">
             <Link href="/" className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-                <svg className="w-4.5 h-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-                </svg>
-              </div>
+              <img src="/logo.jpg" alt="SkillWard" className="w-8 h-8 rounded-lg object-cover" />
               <div>
-                <span className="font-bold text-sm tracking-wider text-white uppercase">{t("nav.title")}</span>
+                <span className="font-bold text-sm tracking-wider text-stone-800 uppercase">{t("nav.title")}</span>
               </div>
             </Link>
 
             <div className="flex items-center gap-6">
-              <Link href="/" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
+              <Link href="/" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-500 hover:text-violet-600 transition-all">
                 {t("nav.submit")}
               </Link>
-              <Link href="/batch" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
-                {t("nav.batch")}
-              </Link>
-              <span className="text-xs font-semibold px-4 py-1.5 rounded-lg bg-cyan-600 text-white">
+              <span className="text-xs font-semibold px-4 py-1.5 rounded-lg bg-violet-600 text-white">
                 {t("nav.history")}
               </span>
               <LanguageToggle />
@@ -126,13 +166,12 @@ export default function HistoryPage() {
       <div className="flex-1">
         <div className="max-w-7xl mx-auto px-8 py-8">
           <div className="mb-6">
-            <div className="text-[11px] font-bold text-cyan-600 uppercase tracking-wider mb-1">{t("history.subtitle")}</div>
             <h1 className="text-2xl font-bold text-stone-800">{t("history.title")}</h1>
           </div>
 
           {loading ? (
             <div className="text-center py-20 text-stone-400">
-              <span className="w-6 h-6 border-2 border-stone-300 border-t-cyan-500 rounded-full animate-spin inline-block" />
+              <span className="w-6 h-6 border-2 border-stone-300 border-t-violet-500 rounded-full animate-spin inline-block" />
               <p className="mt-3 text-sm">{t("history.loading")}</p>
             </div>
           ) : records.length === 0 ? (
@@ -143,11 +182,12 @@ export default function HistoryPage() {
                 </svg>
               </div>
               <p className="text-stone-400 text-sm">{t("history.empty")}</p>
-              <Link href="/" className="inline-block mt-4 text-xs text-cyan-600 hover:text-cyan-700 font-semibold">
+              <Link href="/" className="inline-block mt-4 text-xs text-violet-600 hover:text-violet-700 font-semibold">
                 {t("history.go_scan")} &rarr;
               </Link>
             </div>
           ) : (
+            <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {records.map((record) => {
                 const vc = getVerdictConfig(record.verdict);
@@ -179,7 +219,7 @@ export default function HistoryPage() {
                       {tags.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mb-2.5">
                           {tags.map((tag) => (
-                            <span key={tag} className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-red-50 text-red-500 border border-red-100">
+                            <span key={tag} className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 border border-violet-100">
                               {tag}
                             </span>
                           ))}
@@ -199,7 +239,7 @@ export default function HistoryPage() {
                       {/* Latency */}
                       {record.latency && record.latency.total > 0 && (
                         <div className="flex items-center gap-2 mb-2 text-[10px] text-stone-400 font-mono">
-                          <span className="text-cyan-600 font-semibold">{record.latency.total.toFixed(1)}s</span>
+                          <span className="text-violet-600 font-semibold">{record.latency.total.toFixed(1)}s</span>
                           <span className="text-stone-300">|</span>
                           <span>S:{record.latency.static.toFixed(1)}s</span>
                           {record.latency.llm > 0 && <span>L:{record.latency.llm.toFixed(1)}s</span>}
@@ -226,6 +266,12 @@ export default function HistoryPage() {
                 );
               })}
             </div>
+            {hasMore && (
+              <div ref={loadMoreRef} className="py-8 text-center text-stone-400">
+                {loadingMore ? "Loading..." : ""}
+              </div>
+            )}
+            </>
           )}
         </div>
       </div>

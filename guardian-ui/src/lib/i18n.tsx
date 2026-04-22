@@ -6,7 +6,7 @@ export type Locale = "zh" | "en";
 
 const translations = {
   // ── Nav ──
-  "nav.title": { zh: "Skills Scanner", en: "Skills Scanner" },
+  "nav.title": { zh: "SkillWard", en: "SkillWard" },
   "nav.subtitle": { zh: "AI 安全检测流水线", en: "AI Security Pipeline" },
   "nav.submit": { zh: "提交", en: "Submit" },
   "nav.history": { zh: "历史", en: "History" },
@@ -30,17 +30,22 @@ const translations = {
   "stage.2.desc": { zh: "大模型深度理解代码意图，识别混淆与隐蔽后门", en: "Deep code intent analysis via LLM, detecting obfuscation and hidden backdoors" },
   "stage.3.label": { zh: "STAGE 3", en: "STAGE 3" },
   "stage.3.name": { zh: "沙箱执行", en: "Sandbox Execution" },
-  "stage.3.desc": { zh: "Docker 隔离容器中实际执行，FangcunGuard 实时监控行为", en: "Real execution in Docker isolation, FangcunGuard monitors behavior in real-time" },
+  "stage.3.desc": { zh: "Docker 隔离容器中实际执行，定制化 Guard 实时监控行为", en: "Real execution in Docker isolation, customized Guard monitors behavior in real-time" },
   "pipeline.deep_available": { zh: "深度扫描可用", en: "Deep scan available" },
   "stage.4.label": { zh: "STAGE 4", en: "STAGE 4" },
   "stage.4.name": { zh: "深度追踪", en: "Deep Trace" },
   "stage.4.desc": { zh: "追踪并检查 Agent 访问的外部链接与资源内容", en: "Traces and inspects external URLs and resources accessed by the Agent" },
 
+  // ── Submit mode toggle ──
+  "submit.mode.single": { zh: "单个扫描", en: "Single Scan" },
+  "submit.mode.batch": { zh: "批量扫描", en: "Batch Scan" },
+
   // ── Upload panel ──
   "upload.tab.file": { zh: "文件", en: "File" },
   "upload.tab.url": { zh: "URL", en: "URL" },
-  "upload.drop.prompt": { zh: "点击选择一个 Skill（包含 SKILL.md）", en: "Click to select a skill (containing SKILL.md)" },
+  "upload.drop.prompt": { zh: "点击选择一个 Skill 压缩包（包含 SKILL.md）", en: "Click to select a skill archive (containing SKILL.md)" },
   "upload.drop.formats": { zh: "支持格式：", en: "Supported: " },
+  "upload.drop.folder": { zh: "skill 文件夹", en: "skill folder" },
   "upload.drop.must_contain": { zh: "Skill 压缩包必须包含 ", en: "Skill archive must contain " },
   "upload.drop.remove": { zh: "移除并重新选择", en: "Remove & choose another" },
   "upload.drop.files_count": { zh: " 个文件", en: " files" },
@@ -193,18 +198,20 @@ const translations = {
   "tag.early_term": { zh: "提前终止", en: "Early Termination" },
   "tag.static_find": { zh: "静态发现", en: "Static Findings" },
 
+  // ── Batch upload ──
+  "batch.upload.prompt": { zh: "点击上传包含多个 Skill 的压缩包", en: "Click to upload an archive containing multiple Skills" },
+  "batch.upload.hint": { zh: "压缩包内每个 Skill 文件夹须包含 SKILL.md", en: "Each Skill folder inside must contain SKILL.md" },
+  "batch.uploading": { zh: "上传中...", en: "Uploading..." },
+
   // ── Batch scan ──
   "batch.title": { zh: "批量扫描", en: "Batch Scan" },
   "batch.subtitle": { zh: "// 批量检测 BATCH SCAN", en: "// BATCH SCAN" },
-  "batch.dir_label": { zh: "Skills 目录路径", en: "Skills Directory Path" },
-  "batch.dir_placeholder": { zh: "/path/to/skills-folder", en: "/path/to/skills-folder" },
+  "batch.dir_label": { zh: "Skills 压缩包", en: "Skills Archive" },
+  "batch.dir_placeholder": { zh: "点击上传 .zip / .tar.gz 压缩包", en: "Click to upload .zip / .tar.gz archive" },
   "batch.concurrency": { zh: "并发数", en: "Workers" },
   "batch.runtime": { zh: "沙箱", en: "Sandbox" },
   "batch.start": { zh: "开始扫描", en: "Start Scan" },
   "batch.stop": { zh: "停止", en: "Stop" },
-  "batch.upload_zip": { zh: "上传压缩包", en: "Upload Archive" },
-  "batch.uploading": { zh: "上传中...", en: "Uploading..." },
-  "batch.skills_discovered": { zh: "发现 {n} 个 Skill", en: "{n} skills found" },
   "batch.scanning": { zh: "扫描进行中...", en: "Scanning..." },
   "batch.complete": { zh: "扫描完成", en: "Scan Complete" },
   "batch.results": { zh: "扫描结果", en: "Scan Results" },
@@ -279,12 +286,14 @@ const I18nContext = createContext<I18nContextValue | null>(null);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>("zh");
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("guardian-locale") as Locale | null;
     if (saved === "zh" || saved === "en") {
       setLocaleState(saved);
     }
+    setReady(true);
   }, []);
 
   const setLocale = useCallback((l: Locale) => {
@@ -359,14 +368,14 @@ export function LanguageToggle() {
               onClick={() => { setLocale(opt.key); setOpen(false); }}
               className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs transition-colors ${
                 locale === opt.key
-                  ? "bg-cyan-600/20 text-cyan-400"
+                  ? "bg-violet-600/20 text-violet-400"
                   : "text-stone-300 hover:bg-white/5 hover:text-white"
               }`}
             >
               <span className="text-sm">{opt.flag}</span>
               <span className="font-medium">{opt.label}</span>
               {locale === opt.key && (
-                <svg className="w-3.5 h-3.5 ml-auto text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <svg className="w-3.5 h-3.5 ml-auto text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                 </svg>
               )}

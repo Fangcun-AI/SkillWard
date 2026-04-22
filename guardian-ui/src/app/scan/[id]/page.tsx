@@ -30,7 +30,7 @@ interface ScanRecord {
     runtime: { status: string; elapsed: number; blacklist_hits: number; blocks: number };
   };
   capabilities: string[];
-  warnings: { level: string; source: string; text: string; text_en?: string }[];
+  warnings: { level: string; source: string; source_en?: string; text: string; text_en?: string }[];
   recommendations: string[];
   recommendations_en?: string[];
   findings_count: number;
@@ -49,8 +49,15 @@ const VERDICT_STYLES: Record<string, { bg: string; text: string; border: string;
   CONTENT_RISK: { bg: "bg-orange-50", text: "text-orange-600", border: "border-orange-200", dot: "bg-orange-500" },
   TIMEOUT: { bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200", dot: "bg-stone-400" },
   ERROR: { bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200", dot: "bg-stone-400" },
+  WARNING: { bg: "bg-amber-50", text: "text-amber-600", border: "border-amber-200", dot: "bg-amber-400" },
   INCONCLUSIVE: { bg: "bg-amber-50", text: "text-amber-600", border: "border-amber-200", dot: "bg-amber-400" },
   UNSAFE: { bg: "bg-red-50", text: "text-red-600", border: "border-red-200", dot: "bg-red-500" },
+  // New unified terminology (Safe / Medium Risk / High Risk)
+  "Safe": { bg: "bg-emerald-50", text: "text-emerald-600", border: "border-emerald-200", dot: "bg-emerald-500" },
+  "Medium Risk": { bg: "bg-amber-50", text: "text-amber-600", border: "border-amber-200", dot: "bg-amber-400" },
+  "High Risk": { bg: "bg-red-50", text: "text-red-600", border: "border-red-200", dot: "bg-red-500" },
+  INCOMPLETE: { bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200", dot: "bg-stone-400" },
+  SANDBOX_FAILED: { bg: "bg-stone-50", text: "text-stone-500", border: "border-stone-200", dot: "bg-stone-400" },
 };
 
 const VERDICT_LABEL_KEYS: Record<string, string> = {
@@ -59,6 +66,13 @@ const VERDICT_LABEL_KEYS: Record<string, string> = {
   CAPABILITY_RISK: "report.verdict.cap_risk", CONTENT_RISK: "report.verdict.content_risk",
   TIMEOUT: "report.verdict.timeout", ERROR: "report.verdict.error",
   INCONCLUSIVE: "report.verdict.inconclusive", UNSAFE: "report.verdict.danger",
+  WARNING: "report.verdict.warn", DANGER: "report.verdict.danger",
+  // New unified terminology
+  "Safe": "report.verdict.safe",
+  "Medium Risk": "report.verdict.warn",
+  "High Risk": "report.verdict.danger",
+  INCOMPLETE: "report.verdict.timeout",
+  SANDBOX_FAILED: "report.verdict.error",
 };
 
 const LEVEL_STYLES: Record<string, { bg: string; text: string; border: string }> = {
@@ -106,13 +120,13 @@ export default function ScanDetailPage() {
   const getVerdictConfig = (verdict: string) => {
     const style = VERDICT_STYLES[verdict] || VERDICT_STYLES.ERROR;
     const labelKey = VERDICT_LABEL_KEYS[verdict] || "report.verdict.error";
-    return { ...style, label: t(labelKey) };
+    return { ...style, label: t(labelKey as Parameters<typeof t>[0]) };
   };
 
   const getLevelConfig = (level: string) => {
     const style = LEVEL_STYLES[level] || LEVEL_STYLES.info;
     const labelKey = LEVEL_LABEL_KEYS[level] || "report.level.info";
-    return { ...style, label: t(labelKey) };
+    return { ...style, label: t(labelKey as Parameters<typeof t>[0]) };
   };
 
   const [record, setRecord] = useState<ScanRecord | null>(null);
@@ -179,6 +193,11 @@ export default function ScanDetailPage() {
   const confidence = confidenceRaw ?? 0;
   const confidencePct = Math.round(confidence * 100);
 
+  // Sandbox actually ran (not SKIPPED). When true, Stage A max-severity label is
+  // superseded by Stages B/C and shown-CRITICAL becomes visually misleading.
+  const _rtStatus = record.stages.runtime.status || "";
+  const didSandboxRun = !["SKIPPED", "N/A", ""].includes(_rtStatus);
+
   // Group warnings by source
   const SOURCE_MAP: Record<string, string> = {
     "静态分析": t("report.source.static"),
@@ -189,7 +208,12 @@ export default function ScanDetailPage() {
   };
   const warningsBySource: Record<string, typeof record.warnings> = {};
   for (const w of record.warnings) {
-    const src = SOURCE_MAP[w.source] || w.source || t("report.source.other");
+    // Translate source: first try SOURCE_MAP (known zh keys), then w.source_en if EN locale,
+    // then raw w.source, then generic "other"
+    const src = SOURCE_MAP[w.source]
+      || (isEn && w.source_en)
+      || w.source
+      || t("report.source.other");
     if (!warningsBySource[src]) warningsBySource[src] = [];
     warningsBySource[src].push(w);
   }
@@ -280,19 +304,21 @@ export default function ScanDetailPage() {
                 <span className="text-xs text-stone-400">{t("report.static.count")}</span>
               </div>
               <div className="flex items-center gap-2 mt-2">
+                {!didSandboxRun && (
+                  <span className={cn(
+                    "text-[10px] font-bold px-2 py-0.5 rounded-md",
+                    record.stages.static.severity === "HIGH" || record.stages.static.severity === "CRITICAL"
+                      ? "bg-red-50 text-red-600"
+                      : record.stages.static.severity === "MEDIUM"
+                      ? "bg-amber-50 text-amber-600"
+                      : "bg-emerald-50 text-emerald-600"
+                  )}>
+                    {record.stages.static.severity || "NONE"}
+                  </span>
+                )}
                 <span className={cn(
                   "text-[10px] font-bold px-2 py-0.5 rounded-md",
-                  record.stages.static.severity === "HIGH" || record.stages.static.severity === "CRITICAL"
-                    ? "bg-red-50 text-red-600"
-                    : record.stages.static.severity === "MEDIUM"
-                    ? "bg-amber-50 text-amber-600"
-                    : "bg-emerald-50 text-emerald-600"
-                )}>
-                  {record.stages.static.severity || "NONE"}
-                </span>
-                <span className={cn(
-                  "text-[10px] font-bold px-2 py-0.5 rounded-md",
-                  record.stages.static.verdict === "SAFE" || record.stages.static.verdict === "PASSED"
+                  ["SAFE", "PASSED", "Safe"].includes(record.stages.static.verdict)
                     ? "bg-emerald-50 text-emerald-600"
                     : "bg-red-50 text-red-600"
                 )}>
@@ -308,7 +334,7 @@ export default function ScanDetailPage() {
                 <span className={cn(
                   "text-lg font-bold",
                   record.stages.runtime.status === "BLOCKED" ? "text-red-600"
-                    : record.stages.runtime.status === "PASSED" || record.stages.runtime.status === "SAFE" ? "text-emerald-600"
+                    : ["PASSED", "SAFE", "Safe"].includes(record.stages.runtime.status) ? "text-emerald-600"
                     : "text-stone-600"
                 )}>
                   {record.stages.runtime.status}
@@ -351,7 +377,7 @@ export default function ScanDetailPage() {
               <div className="relative">
                 <div className={cn(
                   "card-white rounded-l-xl lg:rounded-r-none rounded-xl lg:rounded-bl-xl border p-5 h-full",
-                  record.stages.static.verdict === "SAFE" || record.stages.static.verdict === "PASSED"
+                  ["SAFE", "PASSED", "Safe"].includes(record.stages.static.verdict)
                     ? "border-emerald-200" : "border-red-200"
                 )}>
                   <div className="flex items-center gap-2 mb-3">
@@ -361,7 +387,7 @@ export default function ScanDetailPage() {
                       </svg>
                     </div>
                     <div>
-                      <span className="text-[10px] font-mono font-bold text-cyan-500">STAGE 1</span>
+                      <span className="text-[10px] font-mono font-bold text-cyan-500">STAGE A</span>
                       <div className="text-sm font-bold text-stone-700">{t("report.stage.static")}</div>
                     </div>
                   </div>
@@ -369,7 +395,7 @@ export default function ScanDetailPage() {
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-stone-400">{t("report.stage.verdict")}</span>
                       <span className={cn("font-bold",
-                        record.stages.static.verdict === "SAFE" || record.stages.static.verdict === "PASSED"
+                        ["SAFE", "PASSED", "Safe"].includes(record.stages.static.verdict)
                           ? "text-emerald-600" : "text-red-600"
                       )}>{record.stages.static.verdict}</span>
                     </div>
@@ -377,13 +403,15 @@ export default function ScanDetailPage() {
                       <span className="text-stone-400">{t("report.stage.findings_count")}</span>
                       <span className="font-bold text-stone-700 font-mono">{record.stages.static.findings}</span>
                     </div>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-stone-400">{t("report.stage.severity")}</span>
-                      <span className={cn("font-bold",
-                        record.stages.static.severity === "HIGH" || record.stages.static.severity === "CRITICAL"
-                          ? "text-red-600" : record.stages.static.severity === "MEDIUM" ? "text-amber-600" : "text-emerald-600"
-                      )}>{record.stages.static.severity || "NONE"}</span>
-                    </div>
+                    {!didSandboxRun && (
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-stone-400">{t("report.stage.severity")}</span>
+                        <span className={cn("font-bold",
+                          record.stages.static.severity === "HIGH" || record.stages.static.severity === "CRITICAL"
+                            ? "text-red-600" : record.stages.static.severity === "MEDIUM" ? "text-amber-600" : "text-emerald-600"
+                        )}>{record.stages.static.severity || "NONE"}</span>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-stone-400">{t("report.stage.elapsed")}</span>
                       <span className="font-mono text-stone-500">{latency.static.toFixed(2)}s</span>
@@ -414,7 +442,7 @@ export default function ScanDetailPage() {
                       </svg>
                     </div>
                     <div>
-                      <span className="text-[10px] font-mono font-bold text-violet-500">STAGE 2</span>
+                      <span className="text-[10px] font-mono font-bold text-violet-500">STAGE B</span>
                       <div className="text-sm font-bold text-stone-700">{t("report.stage.llm")}</div>
                     </div>
                   </div>
@@ -458,20 +486,27 @@ export default function ScanDetailPage() {
 
               {/* Stage 3: Runtime */}
               <div className="relative">
+                {(() => {
+                  const _rs = record.stages.runtime.status;
+                  const _isSafe = ["PASSED", "SAFE", "Safe"].includes(_rs);
+                  const _isDanger = ["BLOCKED", "DANGER", "High Risk"].includes(_rs);
+                  const _isWarn = ["WARNING", "Medium Risk"].includes(_rs);
+                  const borderCls = _isDanger ? "border-red-200" : _isSafe ? "border-emerald-200" : _isWarn ? "border-amber-200" : "border-stone-200";
+                  const iconBg = _isDanger ? "bg-red-100 text-red-600" : _isSafe ? "bg-emerald-100 text-emerald-600" : _isWarn ? "bg-amber-100 text-amber-600" : "bg-stone-100 text-stone-500";
+                  const labelColor = _isDanger ? "text-red-500" : _isSafe ? "text-emerald-500" : _isWarn ? "text-amber-500" : "text-stone-400";
+                  return (
                 <div className={cn(
                   "card-white rounded-r-xl lg:rounded-l-none rounded-xl lg:rounded-br-xl border p-5 h-full",
-                  record.stages.runtime.status === "BLOCKED" ? "border-red-200"
-                    : record.stages.runtime.status === "PASSED" || record.stages.runtime.status === "SAFE" ? "border-emerald-200"
-                    : "border-stone-200"
+                  borderCls
                 )}>
                   <div className="flex items-center gap-2 mb-3">
-                    <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
+                    <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", iconBg)}>
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7" />
                       </svg>
                     </div>
                     <div>
-                      <span className="text-[10px] font-mono font-bold text-amber-500">STAGE 3</span>
+                      <span className={cn("text-[10px] font-mono font-bold", labelColor)}>STAGE C</span>
                       <div className="text-sm font-bold text-stone-700">{t("report.stage.runtime")}</div>
                     </div>
                   </div>
@@ -480,7 +515,7 @@ export default function ScanDetailPage() {
                       <span className="text-stone-400">{t("report.stage.status")}</span>
                       <span className={cn("font-bold",
                         record.stages.runtime.status === "BLOCKED" ? "text-red-600"
-                          : record.stages.runtime.status === "PASSED" || record.stages.runtime.status === "SAFE" ? "text-emerald-600"
+                          : ["PASSED", "SAFE", "Safe"].includes(record.stages.runtime.status) ? "text-emerald-600"
                           : "text-stone-600"
                       )}>{record.stages.runtime.status}</span>
                     </div>
@@ -502,6 +537,8 @@ export default function ScanDetailPage() {
                     </div>
                   </div>
                 </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -557,7 +594,15 @@ export default function ScanDetailPage() {
                                 )}>
                                   {lc.label}
                                 </span>
-                                <p className="text-xs text-stone-600 leading-relaxed">{(isEn && w.text_en) || w.text}</p>
+                                <p className="text-xs text-stone-600 leading-relaxed">{(() => {
+                                  let _txt = ((isEn && w.text_en) || w.text) || "";
+                                  // When sandbox ran, strip the legacy "(最高严重级别：...)" / "(max severity:...)"
+                                  // suffix from old static-findings warnings so UI is consistent with sandbox verdict.
+                                  if (didSandboxRun) {
+                                    _txt = _txt.replace(/（最高严重级别：[^）]*）/g, "").replace(/\s*\(max severity:[^)]*\)/g, "").trim();
+                                  }
+                                  return _txt;
+                                })()}</p>
                               </div>
                             );
                           })}
@@ -701,28 +746,23 @@ function NavBar() {
   const { t } = useI18n();
   return (
     <nav className="shrink-0">
-      <div className="accent-line" />
-      <div className="nav-dark">
+      <div className="nav-light bg-white/90 backdrop-blur-sm border-b border-stone-200">
         <div className="max-w-7xl mx-auto px-8 h-14 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-              <svg className="w-4.5 h-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-              </svg>
-            </div>
+            <img src="/logo.jpg" alt="SkillWard" className="w-8 h-8 rounded-lg object-cover" />
             <div>
-              <span className="font-bold text-sm tracking-wider text-white uppercase">{t("nav.title")}</span>
+              <span className="font-bold text-sm tracking-wider text-stone-800 uppercase">{t("nav.title")}</span>
             </div>
           </Link>
 
           <div className="flex items-center gap-6">
-            <Link href="/" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
+            <Link href="/" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-500 hover:text-violet-600 transition-all">
               {t("nav.submit")}
             </Link>
-            <Link href="/batch" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
+            <Link href="/batch" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-500 hover:text-violet-600 transition-all">
               {t("nav.batch")}
             </Link>
-            <Link href="/history" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
+            <Link href="/history" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-500 hover:text-violet-600 transition-all">
               {t("nav.history")}
             </Link>
             <LanguageToggle />

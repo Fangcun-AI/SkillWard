@@ -50,7 +50,7 @@ export default function BatchPage() {
   const [skillsDir, setSkillsDir] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [discoveredSkills, setDiscoveredSkills] = useState(0);
+  const [discoveredSkills, setDiscoveredSkills] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [concurrency, setConcurrency] = useState(6);
   const [scanMode, setScanMode] = useState<"static" | "sandbox" | "deep">("deep");
@@ -74,7 +74,7 @@ export default function BatchPage() {
   const startScan = useCallback(async () => {
     let dir = skillsDir.trim();
 
-    // Upload archive first if user selected a file and didn't specify a path.
+    // If file selected, upload first
     if (selectedFile && !dir) {
       setUploading(true);
       setErrorMsg("");
@@ -82,11 +82,7 @@ export default function BatchPage() {
         const formData = new FormData();
         formData.append("file", selectedFile);
         const uploadRes = await fetch(`${API_BASE}/api/batch/upload`, { method: "POST", body: formData });
-        if (!uploadRes.ok) {
-          setErrorMsg(`Upload failed: HTTP ${uploadRes.status}`);
-          setUploading(false);
-          return;
-        }
+        if (!uploadRes.ok) { setErrorMsg(`Upload failed: HTTP ${uploadRes.status}`); setUploading(false); return; }
         const uploadData = await uploadRes.json();
         dir = uploadData.skills_dir;
         setSkillsDir(dir);
@@ -114,7 +110,7 @@ export default function BatchPage() {
       concurrency: String(concurrency),
       use_llm: String(useLlm),
       use_runtime: String(useRuntime),
-      use_verify: String(enableAfterTool),
+      enable_after_tool: String(enableAfterTool),
     });
 
     const controller = new AbortController();
@@ -259,17 +255,13 @@ export default function BatchPage() {
     <div className="min-h-screen bg-warm flex flex-col">
       {/* Nav */}
       <nav className="shrink-0">
-        <div className="accent-line" />
-        <div className="nav-dark">
+
+        <div className="nav-light bg-white/90 backdrop-blur-sm border-b border-stone-200">
           <div className="max-w-7xl mx-auto px-8 h-14 flex items-center justify-between">
             <Link href="/" className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-                <svg className="w-4.5 h-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-                </svg>
-              </div>
+              <img src="/logo.jpg" alt="SkillWard" className="w-8 h-8 rounded-lg object-cover" />
               <div>
-                <span className="font-bold text-sm tracking-wider text-white uppercase">{t("nav.title")}</span>
+                <span className="font-bold text-sm tracking-wider text-stone-800 uppercase">{t("nav.title")}</span>
               </div>
             </Link>
 
@@ -277,7 +269,7 @@ export default function BatchPage() {
               <Link href="/" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
                 {t("nav.submit")}
               </Link>
-              <span className="text-xs font-semibold px-4 py-1.5 rounded-lg bg-cyan-600 text-white">
+              <span className="text-xs font-semibold px-4 py-1.5 rounded-lg bg-violet-600 text-white">
                 {t("nav.batch")}
               </span>
               <Link href="/history" className="text-xs font-semibold px-4 py-1.5 rounded-lg text-stone-400 hover:text-white transition-all">
@@ -295,73 +287,103 @@ export default function BatchPage() {
 
       {/* Content */}
       <div className="flex-1">
-        <div className="max-w-7xl mx-auto px-8 py-8">
+        <div className="max-w-6xl mx-auto px-8 py-10">
           {/* Title */}
-          <div className="mb-6">
-            <h1 className="text-2xl font-bold text-stone-800">{t("batch.title")}</h1>
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-stone-800 mb-2">{t("batch.title")}</h1>
+            <p className="text-sm text-stone-400">{t("batch.subtitle")}</p>
           </div>
 
-          {/* Input form */}
-          <div className="card-white rounded-xl border border-stone-200 p-6 mb-6">
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4">
-              {/* Path input OR archive upload */}
-              <div>
-                <label className="block text-xs font-semibold text-stone-500 mb-1.5">{t("batch.dir_label")}</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={skillsDir}
-                    onChange={(e) => { setSkillsDir(e.target.value); if (e.target.value) setSelectedFile(null); }}
-                    placeholder={t("batch.dir_placeholder")}
-                    className="flex-1 px-4 py-2.5 rounded-lg border border-stone-200 bg-stone-50 text-sm text-stone-800 font-mono placeholder:text-stone-300 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-200 focus:outline-none transition-all"
-                    disabled={scanning || uploading}
-                  />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".zip,.tar.gz,.tgz"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) { setSelectedFile(f); setSkillsDir(""); setDiscoveredSkills(0); }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={scanning || uploading}
-                    className="shrink-0 px-4 py-2.5 rounded-lg border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:border-cyan-400 hover:text-cyan-600 transition-all disabled:opacity-40"
-                  >
-                    {t("batch.upload_zip")}
-                  </button>
-                </div>
-                {selectedFile && (
-                  <div className="mt-2 flex items-center gap-2 text-xs text-stone-500">
-                    <span className="font-mono text-stone-700">{selectedFile.name}</span>
-                    <span>({(selectedFile.size / 1024).toFixed(1)} KB)</span>
-                    {discoveredSkills > 0 && (
-                      <span className="text-emerald-600">
-                        — {t("batch.skills_discovered", { n: discoveredSkills })}
-                      </span>
-                    )}
+          {/* Upload + Controls */}
+          <div className="flex gap-6 mb-8">
+            {/* Left: Upload zone */}
+            <div className="flex-1 card-white rounded-xl border border-stone-200 p-6">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".zip,.tar.gz,.tgz"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) { setSelectedFile(file); setSkillsDir(""); setDiscoveredSkills(0); }
+                }}
+                disabled={scanning || uploading}
+              />
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className={cn(
+                  "drop-zone rounded-xl flex flex-col items-center justify-center py-16 px-6 cursor-pointer group border-2 border-dashed border-stone-200 hover:border-violet-400 bg-stone-50/50 hover:bg-violet-50/30 transition-all",
+                  (scanning || uploading) && "opacity-50 pointer-events-none"
+                )}
+              >
+                {selectedFile ? (
+                  <>
+                    <div className="w-14 h-14 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center mb-4">
+                      <svg className="w-7 h-7 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <p className="text-sm text-stone-700 font-semibold mb-1">{selectedFile.name}</p>
+                    <p className="text-xs text-stone-400 font-mono">{(selectedFile.size / 1024 / 1024).toFixed(1)} MB</p>
                     <button
-                      onClick={() => { setSelectedFile(null); setDiscoveredSkills(0); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                      className="text-stone-400 hover:text-red-500 transition-colors"
+                      onClick={(e) => { e.stopPropagation(); setSelectedFile(null); setSkillsDir(""); setDiscoveredSkills(0); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                      className="mt-3 text-xs text-stone-400 hover:text-red-500 transition-colors"
                     >
-                      ✕
+                      {t("upload.drop.remove")}
                     </button>
-                  </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-14 h-14 rounded-xl bg-violet-50 border border-violet-200 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                      <svg className="w-7 h-7 text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                      </svg>
+                    </div>
+                    <p className="text-sm text-stone-500 mb-2">{t("batch.dir_placeholder")}</p>
+                    <p className="text-xs text-stone-400 font-mono">
+                      <span className="text-stone-600">.zip</span> · <span className="text-stone-600">.tar.gz</span> · <span className="text-stone-600">.tgz</span>
+                    </p>
+                  </>
                 )}
               </div>
+            </div>
 
-              {/* Controls row */}
-              <div className="flex items-end gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-stone-500 mb-1.5">{t("batch.concurrency")}</label>
+            {/* Right: Controls */}
+            <div className="w-[280px] shrink-0 flex flex-col gap-4">
+              {/* Scan mode */}
+              <div className="card-white rounded-xl border border-stone-200 p-5 flex-1">
+                <div className="text-xs font-bold text-violet-700 uppercase tracking-wider mb-3">{t("mode.title")}</div>
+                <div className="space-y-2">
+                  {([
+                    { key: "static" as const, label: t("mode.static.name"), sub: "~10s" },
+                    { key: "sandbox" as const, label: t("mode.sandbox.name"), sub: "~2-3min" },
+                    { key: "deep" as const, label: t("mode.deep.name"), sub: "~2-4min" },
+                  ]).map((m) => (
+                    <button key={m.key}
+                      onClick={() => setScanMode(m.key)}
+                      disabled={scanning}
+                      className={cn(
+                        "w-full flex items-center justify-between px-4 py-3 rounded-lg border transition-all text-left",
+                        scanMode === m.key
+                          ? "border-violet-400 bg-violet-50 shadow-sm"
+                          : "border-stone-200 hover:border-stone-300"
+                      )}
+                    >
+                      <span className={cn("text-sm font-bold", scanMode === m.key ? "text-violet-700" : "text-stone-600")}>{m.label}</span>
+                      <span className={cn("text-[10px] font-mono", scanMode === m.key ? "text-violet-500" : "text-stone-400")}>{m.sub}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Concurrency + Start */}
+              <div className="card-white rounded-xl border border-stone-200 p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <label className="text-xs font-bold text-stone-500">{t("batch.concurrency")}</label>
                   <select
                     value={concurrency}
                     onChange={(e) => setConcurrency(Number(e.target.value))}
-                    className="px-3 py-2.5 rounded-lg border border-stone-200 bg-stone-50 text-sm font-mono"
+                    className="px-3 py-1.5 rounded-lg border border-stone-200 bg-stone-50 text-sm font-mono"
                     disabled={scanning}
                   >
                     {[1, 2, 4, 6, 8, 12].map((n) => (
@@ -369,38 +391,18 @@ export default function BatchPage() {
                     ))}
                   </select>
                 </div>
-
-                <div className="flex items-center gap-1 bg-stone-100 rounded-lg p-0.5">
-                  {([
-                    { key: "static" as const, label: t("mode.static.name") },
-                    { key: "sandbox" as const, label: t("mode.sandbox.name") },
-                    { key: "deep" as const, label: t("mode.deep.name") },
-                  ]).map((m) => (
-                    <button key={m.key}
-                      onClick={() => setScanMode(m.key)}
-                      disabled={scanning}
-                      className={cn(
-                        "px-3 py-1.5 rounded-md text-xs font-bold transition-all",
-                        scanMode === m.key
-                          ? "bg-white text-cyan-600 shadow-sm"
-                          : "text-stone-400 hover:text-stone-600"
-                      )}
-                    >{m.label}</button>
-                  ))}
-                </div>
-
                 {!scanning ? (
                   <button
                     onClick={startScan}
-                    disabled={!skillsDir.trim() && !selectedFile || uploading}
-                    className="px-6 py-2.5 rounded-lg bg-cyan-600 text-white text-sm font-bold hover:bg-cyan-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                    disabled={(!selectedFile && !skillsDir.trim()) || uploading}
+                    className="w-full py-3 rounded-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-bold hover:from-violet-700 hover:to-purple-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-violet-600/20"
                   >
-                    {uploading ? t("batch.uploading") : t("batch.start")}
+                    {uploading ? t("upload.scanning") : t("batch.start")}
                   </button>
                 ) : (
                   <button
                     onClick={stopScan}
-                    className="px-6 py-2.5 rounded-lg bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-all"
+                    className="w-full py-3 rounded-lg bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-all"
                   >
                     {t("batch.stop")}
                   </button>
@@ -424,7 +426,7 @@ export default function BatchPage() {
                 <div
                   className={cn(
                     "h-full rounded-full transition-all duration-300",
-                    scanning ? "bg-cyan-500" : "bg-emerald-500"
+                    scanning ? "bg-violet-500" : "bg-emerald-500"
                   )}
                   style={{ width: `${progressPct}%` }}
                 />
@@ -438,7 +440,7 @@ export default function BatchPage() {
                   <SummaryCard label={t("batch.stat.unsafe")} value={summary.unsafe} color="text-red-600" />
                   <SummaryCard label={t("batch.stat.error")} value={summary.error} color="text-stone-500" />
                   <SummaryCard label={t("batch.stat.fn")} value={summary.false_negatives} color="text-amber-600" />
-                  <SummaryCard label={t("batch.stat.avg_latency")} value={`${summary.latency_avg}s`} color="text-cyan-600" />
+                  <SummaryCard label={t("batch.stat.avg_latency")} value={`${summary.latency_avg}s`} color="text-violet-600" />
                 </div>
               )}
             </div>
@@ -467,7 +469,7 @@ export default function BatchPage() {
                       className={cn(
                         "text-[11px] font-semibold px-3 py-1 rounded-md transition-all",
                         filterVerdict === f
-                          ? "bg-cyan-600 text-white"
+                          ? "bg-violet-600 text-white"
                           : "text-stone-400 hover:text-stone-600 hover:bg-stone-100"
                       )}
                     >
@@ -505,7 +507,7 @@ export default function BatchPage() {
                             </span>
                           </td>
                           <td className="px-6 py-2.5 font-mono text-stone-500">{r.findings}</td>
-                          <td className="px-6 py-2.5 font-mono text-cyan-600">{r.latency}s</td>
+                          <td className="px-6 py-2.5 font-mono text-violet-600">{r.latency}s</td>
                           <td className="px-6 py-2.5">
                             {r.false_negative && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-50 text-amber-600">FN</span>

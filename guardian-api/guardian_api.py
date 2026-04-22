@@ -61,6 +61,11 @@ def _sse_event(stage: int, event_type: str, text: str, data: dict | None = None)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _t(zh: str, en: str, lang: str) -> str:
+    """Pick Chinese or English SSE text based on the request lang."""
+    return zh if lang == "zh" else en
+
+
 def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe: bool,
                    latency: dict = None, batch_id: str = None, lang: str = "en",
                    skill_hash: str = "") -> dict:
@@ -394,7 +399,8 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
     # ══════════════════════════════════════════════════════════════
     # Stage 1: Static Analysis + LLM Safety Scoring
     # ══════════════════════════════════════════════════════════════
-    yield _sse_event(1, "stage", "阶段一: 静态分析 + LLM 安全评估")
+    yield _sse_event(1, "stage", _t("Stage A+B: 静态分析 + LLM 安全评估",
+                                     "Stage A+B: Static Analysis + LLM Evaluation", lang))
     await asyncio.sleep(0.3)
 
     yield _sse_event(1, "step", f"Loading skill: {Path(skill_path).name}")
@@ -606,7 +612,8 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
                         {"prescan": prescan_data, "runtime": None, "verify": None})
         return
 
-    yield _sse_event(2, "stage", "阶段二: Docker 沙箱运行时检测")
+    yield _sse_event(2, "stage", _t("Stage C: Docker 沙箱运行时检测",
+                                     "Stage C: Docker Sandbox Runtime Detection", lang))
     await asyncio.sleep(0.3)
 
     docker_image = settings.docker_image
@@ -708,29 +715,35 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
                         {"prescan": prescan_data, "runtime": runtime_result})
         return
 
-    yield _sse_event(3, "stage", "阶段三: 事后能力分析")
+    # Stage C verification merged into runtime conclusion (no separate stage header)
     await asyncio.sleep(0.3)
-    yield _sse_event(3, "step", "正在分析工具调用链的能力滥用情况...")
+    yield _sse_event(3, "step", _t("正在分析工具调用链的能力滥用情况...",
+                                    "Analyzing tool call chain for capability abuse...", lang))
     await asyncio.sleep(0.2)
 
     scanner_safe = safety_verdict == "SAFE"
-    runtime_safe = runtime_result.get("status") == "PASSED"
+    runtime_safe = runtime_result.get("status") in ("PASSED", "Safe")
 
     if scanner_safe and not runtime_safe:
         yield _sse_event(3, "finding",
-            f"漏报警告: 阶段一判定为安全，但运行时检测到 {runtime_result.get('status')}")
+            _t(f"漏报警告: Stage A+B 判定为安全，但运行时检测到 {runtime_result.get('status')}",
+               f"False negative: Stage A+B marked safe but runtime detected {runtime_result.get('status')}", lang))
         await asyncio.sleep(0.2)
         final_verdict = runtime_result.get("status", "DANGER")
         yield _sse_event(3, "result",
-            f"最终结论: {final_verdict} — 运行时检测发现了静态分析遗漏的威胁",
+            _t(f"最终结论: {final_verdict} — 运行时检测发现了静态分析遗漏的威胁",
+               f"Final verdict: {final_verdict} — runtime detected threat missed by static analysis", lang),
             {"verdict": final_verdict, "false_negative": True})
     elif not runtime_safe:
         yield _sse_event(3, "result",
-            f"最终结论: {runtime_result.get('status')} — 两个阶段均确认",
+            _t(f"最终结论: {runtime_result.get('status')} — Stage A+B + C 均确认",
+               f"Final verdict: {runtime_result.get('status')} — confirmed by Stage A+B and C", lang),
             {"verdict": runtime_result.get("status"), "false_negative": False})
     else:
-        yield _sse_event(3, "result", "最终结论: SAFE — 通过所有阶段检查",
-                        {"verdict": "SAFE", "false_negative": False})
+        yield _sse_event(3, "result",
+            _t("最终结论: SAFE — 通过所有 Stage 检查",
+               "Final verdict: SAFE — passed all stages", lang),
+            {"verdict": "SAFE", "false_negative": False})
 
     await asyncio.sleep(0.3)
 
@@ -1530,6 +1543,34 @@ async def upload_skill(file: UploadFile = File(...)):
 @app.post("/api/scan/upload-folder")
 async def upload_folder(files: list[UploadFile] = File(...)):
     tmp_dir = tempfile.mkdtemp(prefix="guardian_folder_")
+
+    # Single archive fast path: if the only file is .zip / .tar.gz / .tgz,
+    # extract it and walk the extracted tree for SKILL.md.
+    if len(files) == 1 and files[0].filename:
+        fname = files[0].filename.lower()
+        if fname.endswith(".zip") or fname.endswith(".tar.gz") or fname.endswith(".tgz"):
+            archive_path = os.path.join(tmp_dir, files[0].filename)
+            with open(archive_path, "wb") as out:
+                out.write(await files[0].read())
+            extract_dir = os.path.join(tmp_dir, "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            if fname.endswith(".zip"):
+                with zipfile.ZipFile(archive_path, "r") as zf:
+                    zf.extractall(extract_dir)
+            else:
+                import tarfile
+                with tarfile.open(archive_path, "r:gz") as tf:
+                    tf.extractall(extract_dir)
+            for root, dirs, fnames in os.walk(extract_dir):
+                if "SKILL.md" in fnames:
+                    return {"skill_path": root, "skill_name": Path(root).name}
+            subdirs = [d for d in os.listdir(extract_dir) if os.path.isdir(os.path.join(extract_dir, d))]
+            if subdirs:
+                skill_dir = os.path.join(extract_dir, subdirs[0])
+                return {"skill_path": skill_dir, "skill_name": subdirs[0]}
+            return {"skill_path": extract_dir, "skill_name": Path(extract_dir).name}
+
+    # Multi-file folder upload (webkitdirectory): write each file preserving relative path.
     for f in files:
         rel_path = f.filename or f.headers.get("filename", "unknown")
         dest = os.path.join(tmp_dir, rel_path)
