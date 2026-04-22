@@ -14,7 +14,7 @@ export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
   const [skillPath, setSkillPath] = useState<string | undefined>(undefined);
   const [scanConfig, setScanConfig] = useState<ScanConfig>({
-    policy: "balanced", useLlm: true, useRuntime: true, useVerify: true,
+    policy: "balanced", useLlm: true, useRuntime: true, enableAfterTool: true,
   });
   const [scanMode, setScanMode] = useState<ScanMode>("deep");
   const [settingsOpen, setSettingsOpen] = useState(false);

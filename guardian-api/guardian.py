@@ -659,8 +659,21 @@ def run_two_phase_test(skill_folder, skills_dir, output_dir, image=None,
                        timeout=None, prep_timeout=None,
                        azure_url=None, azure_key=None, model=None,
                        max_retries=None, retry_delay=None,
-                       enable_after_tool=False):
-    """Run one skill test in Docker with two phases. Returns result dict."""
+                       enable_after_tool=False,
+                       on_progress=None):
+    """Run one skill test in Docker with two phases. Returns result dict.
+
+    on_progress: optional callable (kind: str, msg: str) -> None invoked at
+      key milestones so callers (e.g. FastAPI SSE streamer) can surface
+      progress to the UI. `kind` is one of: step, alert, finding, api.
+    """
+    def _emit(kind, msg):
+        if on_progress:
+            try:
+                on_progress(kind, msg)
+            except Exception:
+                pass  # never let user callback break the pipeline
+
     settings = get_settings()
     image = image or settings.docker_image
     timeout = timeout or settings.phase2_timeout
@@ -781,7 +794,7 @@ for _i in $(seq 1 10); do
     sleep 1
 done
 
-timeout {prep_timeout} node /opt/openclaw/openclaw.mjs agent --local \
+timeout --kill-after=10 {prep_timeout} node /opt/openclaw/openclaw.mjs agent --local \
     --session-id "prep-{skill_name}" \
     -m '{safe_phase1}' --json 2>&1
 
@@ -836,9 +849,18 @@ while [ $ATTEMPT -le $MAX_RETRIES ]; do
     rm -rf /root/.openclaw/sessions/test-* 2>/dev/null
     rm -rf /root/.openclaw/agents/main/sessions/test-* 2>/dev/null
 
-    PHASE2_OUTPUT=$(timeout {timeout} node /opt/openclaw/openclaw.mjs agent --local \
+    # Redirect node output to a FILE (not $() pipe) so orphaned child processes
+    # (codex/claude sub-agents spawned via sessions_spawn) can't wedge the shell
+    # by holding the subshell's pipe open after node itself exits.
+    # --kill-after=10 gives 10s grace after SIGTERM before SIGKILL.
+    # NOTE: do NOT `pkill -f 'codex exec'` here — the phase2 prompt contains
+    # that substring, which would match this script's own bash cmdline.
+    P2_OUT=/tmp/phase2_out_${{ATTEMPT}}
+    timeout --kill-after=10 {timeout} node /opt/openclaw/openclaw.mjs agent --local \
         --session-id "test-{skill_name}" \
-        -m "$(cat /tmp/phase2_prompt.txt)" --json 2>&1)
+        -m "$(cat /tmp/phase2_prompt.txt)" --json > "$P2_OUT" 2>&1
+    PHASE2_OUTPUT=$(cat "$P2_OUT" 2>/dev/null)
+    rm -f "$P2_OUT"
 
     echo "$PHASE2_OUTPUT"
 
@@ -863,33 +885,43 @@ fi
 """
 
     container_ts = int(time.time())
-    container_name = f"guardian-2p-{skill_name}-{container_ts}"
+    # Sanitize container name: lowercase + `_` → `-` keeps it valid for both
+    # Docker and any DNS-1123-compliant backend (e.g., k8s) without changing behavior.
+    _safe_name = skill_name.replace("_", "-").lower()
+    container_name = f"guardian-2p-{_safe_name}-{container_ts}"
+    _sandbox_env = {
+        "AZURE_OPENAI_BASE_URL": azure_url,
+        "AZURE_OPENAI_API_KEY": azure_key,
+        "AZURE_OPENAI_API_VERSION": settings.docker_api_version or settings.llm_api_version,
+        "OPENAI_API_KEY": azure_key,
+        "OPENAI_BASE_URL": azure_url,
+        "ANTHROPIC_API_KEY": azure_key,
+        "GEMINI_API_KEY": azure_key,
+        "MISTRAL_API_KEY": azure_key,
+    }
+    if guard_plugin_api_url:
+        _sandbox_env["FANGCUN_GUARD_API_URL"] = guard_plugin_api_url
+        _sandbox_env["FANGCUNGUARD_API_URL"] = guard_plugin_api_url  # plugin reads this alias
+    if guard_plugin_api_key:
+        _sandbox_env["GUARD_PLUGIN_API_KEY"] = guard_plugin_api_key
+        _sandbox_env["FANGCUNGUARD_API_KEY"] = guard_plugin_api_key  # plugin reads this alias
+    # Disable after_tool_call content check unless explicitly enabled
+    if not enable_after_tool:
+        _sandbox_env["FANGCUN_DISABLE_AFTER_TOOL"] = "1"
+    # Inject dummy API keys for skills that require external credentials
+    required_envs = extract_env_requirements(skill_path)
+    for env_name in required_envs:
+        _sandbox_env[env_name] = "sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"
+
     docker_cmd = [
         "docker", "run", "--rm",
         "--name", container_name,
         "--dns", "8.8.8.8",
         "--entrypoint", "bash",
         "-v", f"{skill_path}:/root/.openclaw/skills/test-skill-src:ro",
-        "-e", f"AZURE_OPENAI_BASE_URL={azure_url}",
-        "-e", f"AZURE_OPENAI_API_KEY={azure_key}",
-        "-e", f"AZURE_OPENAI_API_VERSION={settings.docker_api_version or settings.llm_api_version}",
-        "-e", f"OPENAI_API_KEY={azure_key}",
-        "-e", f"OPENAI_BASE_URL={azure_url}",
-        "-e", f"ANTHROPIC_API_KEY={azure_key}",
-        "-e", f"GEMINI_API_KEY={azure_key}",
-        "-e", f"MISTRAL_API_KEY={azure_key}",
     ]
-    if guard_plugin_api_url:
-        docker_cmd += ["-e", f"FANGCUN_GUARD_API_URL={guard_plugin_api_url}"]
-    if guard_plugin_api_key:
-        docker_cmd += ["-e", f"GUARD_PLUGIN_API_KEY={guard_plugin_api_key}"]
-    # Disable after_tool_call content check unless explicitly enabled
-    if not enable_after_tool:
-        docker_cmd += ["-e", "FANGCUN_DISABLE_AFTER_TOOL=1"]
-    # Inject dummy API keys for skills that require external credentials
-    required_envs = extract_env_requirements(skill_path)
-    for env_name in required_envs:
-        docker_cmd.extend(["-e", f"{env_name}=sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"])
+    for _k, _v in _sandbox_env.items():
+        docker_cmd += ["-e", f"{_k}={_v}"]
     docker_cmd += [image, "-c", inner_script]
 
     max_total_timeout = total_timeout + (max_retries * (timeout + retry_delay)) + 60
@@ -924,6 +956,7 @@ fi
             except Exception:
                 pass
 
+    _emit("step", f"Launching sandbox container ({container_name})...")
     try:
         proc = subprocess.Popen(
             docker_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -935,13 +968,34 @@ fi
 
         blacklist_seen = False
         in_phase2 = False
+        _phase1_announced = False
         try:
             for line in proc.stdout:
                 output_lines.append(line)
                 if not in_phase2:
+                    if not _phase1_announced and "Phase 1" not in line and "===PHASE1_START===" in line:
+                        _emit("step", "Phase 1 started (environment prep, Guardian disabled)...")
+                        _phase1_announced = True
+                    if "===PHASE1_EXIT_CODE" in line:
+                        _emit("step", "Phase 1 complete, switching to Phase 2...")
                     if PHASE2_MARKER in line:
                         in_phase2 = True
+                        _emit("step", "Phase 2 started (skill execution under Guardian)")
                     continue
+
+                if "===PHASE2_ATTEMPT=" in line:
+                    m_attempt = re.search(r"PHASE2_ATTEMPT=(\d+)", line)
+                    if m_attempt:
+                        _emit("step", f"Phase 2 attempt {m_attempt.group(1)}...")
+                if "===PHASE2_RETRY" in line:
+                    _emit("alert", "Agent crashed — retrying")
+                # Surface FangcunGuard plugin events to UI
+                if "[FangcunGuard]" in line or "fangcun-guard]" in line.lower():
+                    low = line.lower()
+                    if "risk detected" in low:
+                        _emit("finding", line.strip()[:200])
+                    elif "tool_check output_raw:" in line:
+                        _emit("api", line.strip()[:200])
 
                 if "Blacklist hit" in line:
                     blacklist_seen = True
@@ -963,6 +1017,7 @@ fi
         watchdog_flag.set()
         output = f"[ERROR] {str(e)}"
         timed_out = False
+    _emit("step", "Execution finished, analyzing output...")
     elapsed = round(time.time() - start, 1)
 
     # Split output by phase marker
@@ -1150,8 +1205,9 @@ def main():
                              "accepted directly. Defaults to settings.sandbox_threshold (0.9).")
 
     # ── Sandbox defaults (previously env vars; override here if needed) ──
-    parser.add_argument("--image", default="fangcunai/skillward:amd64",
-                        help="Docker image used by Stage C sandbox")
+    parser.add_argument("--image", default=None,
+                        help="Docker image used by Stage C sandbox "
+                             "(default: settings.docker_image from .env)")
     parser.add_argument("--phase1-timeout", type=int, default=300,
                         help="Phase 1 (env prep) timeout in seconds")
     parser.add_argument("--phase2-timeout", type=int, default=300,

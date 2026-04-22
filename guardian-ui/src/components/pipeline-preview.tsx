@@ -187,7 +187,7 @@ interface PipelinePreviewProps {
   policy?: string;
   useLlm?: boolean;
   useRuntime?: boolean;
-  useVerify?: boolean;
+  enableAfterTool?: boolean;
   onComplete?: () => void;
 }
 
@@ -329,7 +329,7 @@ function getTimestamp() {
 }
 
 export function PipelinePreview({
-  isScanning, skillPath, policy, useLlm, useRuntime, useVerify, onComplete,
+  isScanning, skillPath, policy, useLlm, useRuntime, enableAfterTool, onComplete,
 }: PipelinePreviewProps) {
   const { t, locale } = useI18n();
   const [lines, setLines] = useState<(LogEntry & { realTime: string })[]>([]);
@@ -367,7 +367,7 @@ export function PipelinePreview({
       policy: policy || "balanced",
       use_llm: String(useLlm !== false),
       use_runtime: String(useRuntime !== false),
-      use_verify: String(useVerify !== false),
+      use_verify: String(enableAfterTool !== false),
     });
 
     const url = `${API_BASE}/api/scan/stream?${params}`;

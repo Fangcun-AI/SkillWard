@@ -90,8 +90,75 @@ def _init_tables(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # Add skill_hash column (migration for existing DBs)
+    try:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN skill_hash TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_skill_hash ON scan_results(skill_hash)")
+    conn.commit()
+    # Add recommendations_en column (migration for bilingual reports)
+    try:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN recommendations_en TEXT DEFAULT '[]'")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
 
-def save_scan(report: dict) -> str:
+
+def compute_skill_hash(skill_path: str) -> str:
+    """SHA256 of all files in a skill directory, truncated to 32 hex chars."""
+    h = hashlib.sha256()
+    skill_dir = Path(skill_path)
+    if not skill_dir.exists():
+        return ""
+    for fpath in sorted(skill_dir.rglob("*")):
+        if fpath.is_file() and "__pycache__" not in str(fpath):
+            try:
+                h.update(fpath.read_bytes())
+            except Exception:
+                pass
+    return h.hexdigest()[:32]
+
+
+def find_by_skill_hash(skill_hash: str, lang: str = "en") -> Optional[dict]:
+    """Return latest scan record with matching skill_hash; None if no usable cache."""
+    if not skill_hash:
+        return None
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM scan_results WHERE skill_hash = ? ORDER BY scan_time DESC LIMIT 1",
+        (skill_hash,)
+    ).fetchone()
+    if not row:
+        return None
+    record = dict(row)
+    # Bilingual records (non-empty recommendations_en) serve both zh and en.
+    # Legacy single-lang records fall back to source-based language inference.
+    recs_en_raw = record.get("recommendations_en") or ""
+    is_bilingual = bool(recs_en_raw) and recs_en_raw not in ("", "[]")
+    if not is_bilingual:
+        source = record.get("source", "") or ""
+        is_zh_record = any("一" < c < "鿿" for c in source)
+        if (lang == "en" and is_zh_record) or (lang == "zh" and not is_zh_record):
+            return None
+    for field in ("stages", "capabilities", "warnings", "recommendations", "recommendations_en"):
+        try:
+            record[field] = json.loads(record[field])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    record["false_negative"] = bool(record["false_negative"])
+    record["latency"] = {
+        "total": record.pop("latency_total", 0),
+        "static": record.pop("latency_static", 0),
+        "llm": record.pop("latency_llm", 0),
+        "runtime": record.pop("latency_runtime", 0),
+        "verify": record.pop("latency_verify", 0),
+    }
+    return record
+
+
+def save_scan(report: dict, skill_hash: str = "") -> str:
     """Save a scan report to the database. Returns the record ID."""
     conn = _get_conn()
 
@@ -109,10 +176,10 @@ def save_scan(report: dict) -> str:
             id, skill_name, skill_description, verdict, false_negative,
             scan_time, source, batch_id,
             latency_total, latency_static, latency_llm, latency_runtime, latency_verify,
-            stages, capabilities, warnings, recommendations,
+            stages, capabilities, warnings, recommendations, recommendations_en,
             findings_count, max_severity, safety_confidence,
-            runtime_status, blacklist_hits, blocks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            runtime_status, blacklist_hits, blocks, skill_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         scan_id,
         report.get("skill_name", "unknown"),
@@ -131,12 +198,14 @@ def save_scan(report: dict) -> str:
         json.dumps(report.get("capabilities", []), ensure_ascii=False),
         json.dumps(report.get("warnings", []), ensure_ascii=False),
         json.dumps(report.get("recommendations", []), ensure_ascii=False),
+        json.dumps(report.get("recommendations_en", []), ensure_ascii=False),
         stages.get("static", {}).get("findings", 0),
         stages.get("static", {}).get("severity", "NONE"),
         stages.get("llm", {}).get("confidence"),
         stages.get("runtime", {}).get("status", "SKIPPED"),
         stages.get("runtime", {}).get("blacklist_hits", 0),
         stages.get("runtime", {}).get("blocks", 0),
+        skill_hash,
     ))
     conn.commit()
     return scan_id
@@ -183,7 +252,7 @@ def get_history(
     for row in rows:
         record = dict(row)
         # Parse JSON fields back
-        for field in ("stages", "capabilities", "warnings", "recommendations"):
+        for field in ("stages", "capabilities", "warnings", "recommendations", "recommendations_en"):
             try:
                 record[field] = json.loads(record[field])
             except (json.JSONDecodeError, TypeError):
@@ -381,7 +450,7 @@ def get_batch_skills(batch_id: str, limit: int = 200, offset: int = 0) -> dict:
     for row in rows:
         r = dict(row)
         r["false_negative"] = bool(r["false_negative"])
-        for f in ("warnings", "recommendations"):
+        for f in ("warnings", "recommendations", "recommendations_en"):
             try:
                 r[f] = json.loads(r[f])
             except (json.JSONDecodeError, TypeError):

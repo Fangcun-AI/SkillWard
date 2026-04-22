@@ -62,101 +62,236 @@ def _sse_event(stage: int, event_type: str, text: str, data: dict | None = None)
 
 
 def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe: bool,
-                   latency: dict = None, batch_id: str = None) -> dict:
-    """Build a structured execution report for the frontend."""
+                   latency: dict = None, batch_id: str = None, lang: str = "en",
+                   skill_hash: str = "") -> dict:
+    """Build a structured execution report for the frontend.
+
+    Always emits BOTH zh and en content for warnings/recommendations so the UI
+    can switch languages at display time without re-querying the backend.
+    `lang` kept for backward compatibility but no longer filters stored content.
+    """
     status = runtime.get("status", "UNKNOWN") if runtime else prescan.get("safety_verdict", "UNKNOWN")
-    # False negative = static said SAFE but runtime *confirmed* a threat (DANGER/CONTENT_RISK)
-    # INCONCLUSIVE/ERROR/TIMEOUT are not confirmations of threat, so don't count as FN
-    runtime_confirmed_threat = status in ("DANGER", "CONTENT_RISK", "WARNING")
+    runtime_confirmed_threat = status in ("DANGER", "CONTENT_RISK", "WARNING", "High Risk")
     is_false_negative = scanner_safe and runtime_confirmed_threat
+    # Skill is sandbox-verified when runtime actually ran (not SKIPPED/UNKNOWN).
+    # In that case, the static-analysis max-severity label is noise — Stages B/C supersede it.
+    sandbox_ran = status not in ("UNKNOWN", "SKIPPED", "", "N/A")
 
     warnings = []
     details = runtime.get("details", []) if runtime else []
+    cap_indicators = runtime.get("cap_indicators", []) if runtime else []
+
+    def _add_w(level, zh_source, en_source, zh_text, en_text):
+        warnings.append({
+            "level": level,
+            "source": zh_source,
+            "source_en": en_source,
+            "text": zh_text,
+            "text_en": en_text,
+        })
 
     if prescan.get("findings_count", 0) > 0:
-        warnings.append({
-            "level": "info",
-            "source": "静态分析",
-            "text": f"检测到 {prescan['findings_count']} 项发现（最高严重级别：{prescan.get('max_severity', 'N/A')}）",
-        })
+        if sandbox_ran:
+            zh_t = f"检测到 {prescan['findings_count']} 项发现"
+            en_t = f"Detected {prescan['findings_count']} findings"
+        else:
+            zh_t = f"检测到 {prescan['findings_count']} 项发现（最高严重级别：{prescan.get('max_severity', 'N/A')}）"
+            en_t = f"Detected {prescan['findings_count']} findings (max severity: {prescan.get('max_severity', 'N/A')})"
+        _add_w("info", "静态分析", "Static Analysis", zh_t, en_t)
 
     if prescan.get("safety_confidence") is not None:
         conf = prescan["safety_confidence"]
-        reason_en = prescan.get("llm_reason_en", "")
-        warnings.append({
-            "level": "info" if conf >= 0.7 else "warning",
-            "source": "LLM 研判",
-            "text": f"安全置信度：{conf:.2f} — {prescan.get('llm_reason', '')}",
-            "text_en": f"Safety confidence: {conf:.2f} — {reason_en}" if reason_en else "",
-        })
+        llm_reason_zh = prescan.get("llm_reason", "") or ""
+        llm_reason_en = prescan.get("llm_reason_en", "") or llm_reason_zh
+        _add_w(
+            "info" if conf >= 0.7 else "warning",
+            "LLM 研判", "LLM Evaluation",
+            f"安全置信度：{conf:.2f} — {llm_reason_zh}",
+            f"Safety confidence: {conf:.2f} — {llm_reason_en}",
+        )
 
+    _seen_warnings = set()
     for d in details:
-        level = "critical" if any(k in d for k in ["Blacklist", "blocked", "Risk Level"]) else "warning"
-        warnings.append({"level": level, "source": "运行时沙箱", "text": d})
+        if d in _seen_warnings:
+            continue
+        _seen_warnings.add(d)
+        if "Blacklist hit" in d or "blacklist" in d.lower():
+            continue
+        level = "critical" if any(k in d for k in ["blocked", "Risk Level"]) else "warning"
+        _add_w(level, "运行时沙箱", "Runtime Sandbox", d, d)
 
     for ind in cap_indicators:
-        warnings.append({"level": "warning", "source": "能力分析", "text": ind})
+        _add_w("warning", "能力分析", "Capability Analysis", ind, ind)
 
+    # Always add a summary Runtime Sandbox warning when sandbox actually ran,
+    # so the UI has a sandbox section even for clean-Safe runs.
+    if sandbox_ran:
+        _rt_bh = runtime.get("blacklist_hits", 0) if runtime else 0
+        _rt_bk = runtime.get("blocks", 0) if runtime else 0
+        _rt_elapsed = runtime.get("elapsed_sec", 0) if runtime else 0
+        if status in ("Safe", "PASSED", "SAFE"):
+            _add_w(
+                "info", "运行时沙箱", "Runtime Sandbox",
+                f"沙箱执行完成（耗时 {_rt_elapsed:.0f}s），未检测到异常工具调用或数据外泄行为。",
+                f"Sandbox execution completed ({_rt_elapsed:.0f}s) with no anomalous tool calls or data exfiltration detected.",
+            )
+        elif status in ("Medium Risk", "WARNING"):
+            _add_w(
+                "warning", "运行时沙箱", "Runtime Sandbox",
+                f"沙箱在执行过程中检测到中等风险信号（黑名单命中 {_rt_bh} 次，拦截 {_rt_bk} 次）。建议人工复核具体行为。",
+                f"Sandbox detected medium-risk signals during execution (blacklist hits: {_rt_bh}, blocks: {_rt_bk}). Manual review recommended.",
+            )
+        elif status in ("High Risk", "DANGER", "BLOCKED", "CONTENT_RISK"):
+            _add_w(
+                "critical", "运行时沙箱", "Runtime Sandbox",
+                f"沙箱检测到高风险行为（黑名单命中 {_rt_bh} 次，拦截 {_rt_bk} 次）。禁止部署。",
+                f"Sandbox detected high-risk behavior (blacklist hits: {_rt_bh}, blocks: {_rt_bk}). DO NOT deploy.",
+            )
+        elif status == "TIMEOUT":
+            _add_w(
+                "info", "运行时沙箱", "Runtime Sandbox",
+                f"沙箱执行超时（{_rt_elapsed:.0f}s 未完成），未能完整验证。参考静态和 LLM 结果。",
+                f"Sandbox execution timed out ({_rt_elapsed:.0f}s), verification incomplete. Refer to static and LLM results.",
+            )
+        elif status in ("INCOMPLETE", "INCONCLUSIVE"):
+            _add_w(
+                "info", "运行时沙箱", "Runtime Sandbox",
+                "Agent 未完整执行 skill 主要功能（可能在询问用户输入），本次未完整验证。建议重试扫描。",
+                "Agent did not fully execute the skill's main function (may have requested user input); verification incomplete. Rescan recommended.",
+            )
+        elif status in ("ERROR", "SANDBOX_FAILED"):
+            _add_w(
+                "info", "运行时沙箱", "Runtime Sandbox",
+                "沙箱执行出错，本次未能完整验证。建议检查依赖和日志。",
+                "Sandbox execution encountered an error; verification incomplete. Check dependencies and logs.",
+            )
 
     if is_false_negative:
-        warnings.append({
-            "level": "critical",
-            "source": "跨阶段验证",
-            "text": "漏报警告：静态分析 + LLM 判定为安全，但运行时沙箱检测到恶意行为",
-        })
+        _add_w(
+            "critical",
+            "综合研判", "Cross-validation",
+            "静态分析未发现风险，但沙箱运行时检测到异常行为，建议仔细审查该 Skill",
+            "Static analysis found no risk but runtime sandbox detected anomalous behavior. Manual review recommended.",
+        )
 
-    # Recommendations
+    # Recommendations — emit both zh and en; UI picks by locale.
     recommendations = []
+    recommendations_en = []
+
+    def _add_r(zh, en):
+        recommendations.append(zh)
+        recommendations_en.append(en)
+
     all_indicators = [d.lower() for d in details + cap_indicators]
     has_external = any("external" in d or "curl" in d or "exfil" in d or "domain" in d for d in all_indicators)
     has_credential = any("credential" in d or "api_key" in d or "token" in d or "secret" in d for d in all_indicators)
     has_write_root = any("write to /root" in d or "write" in d for d in all_indicators)
 
-    if status in ("DANGER", "CONTENT_RISK"):
-        recommendations.append("禁止使用该 Skill — 检测到恶意或高风险行为。")
+    if status in ("DANGER", "CONTENT_RISK", "High Risk"):
+        _add_r(
+            "禁止使用该 Skill — 检测到恶意或高风险行为。",
+            "DO NOT USE this skill — malicious or high-risk behavior detected.",
+        )
         if has_external:
-            recommendations.append("该 Skill 试图访问外部服务或外泄数据，具体行为：向外部域名发起网络请求（如 curl/wget/fetch），"
-                                   "可能将工作环境中的敏感数据（API 密钥、配置文件等）发送到外部服务器。"
-                                   "建议：审查 SKILL.md 中所有涉及网络请求的步骤，确认目标域名是否可信。")
+            _add_r(
+                "该 Skill 试图访问外部服务或外泄数据，具体行为：向外部域名发起网络请求（如 curl/wget/fetch），"
+                "可能将工作环境中的敏感数据（API 密钥、配置文件等）发送到外部服务器。"
+                "建议：审查 SKILL.md 中所有涉及网络请求的步骤，确认目标域名是否可信。",
+                "This skill attempts to access external services or exfiltrate data: it makes network requests to external domains (e.g. curl/wget/fetch), "
+                "potentially sending sensitive data (API keys, config files, etc.) to external servers. "
+                "Recommendation: Review all network-related steps in SKILL.md and verify target domains are trusted.",
+            )
         if has_credential:
-            recommendations.append("检测到凭证访问行为 — 该 Skill 在执行过程中读取了 API 密钥或令牌文件。"
-                                   "即使 Skill 声称只做本地检查，读取凭证后配合网络请求可能导致密钥泄露。"
-                                   "建议：在沙箱环境中不放置真实凭证，或对凭证文件设置严格的访问权限。")
+            _add_r(
+                "检测到凭证访问行为 — 该 Skill 在执行过程中读取了 API 密钥或令牌文件。"
+                "即使 Skill 声称只做本地检查，读取凭证后配合网络请求可能导致密钥泄露。"
+                "建议：在沙箱环境中不放置真实凭证，或对凭证文件设置严格的访问权限。",
+                "Credential access detected — this skill reads API keys or token files during execution. "
+                "Even if the skill claims to only perform local checks, reading credentials combined with network requests could lead to key leakage. "
+                "Recommendation: Do not place real credentials in the sandbox, or set strict access permissions on credential files.",
+            )
         if has_external and has_credential:
-            recommendations.append("高危组合：凭证读取 + 外部请求 = 典型数据外泄模式。"
-                                   "该 Skill 先读取了本地凭证/密钥文件，随后向外部域名发起请求，"
-                                   "这是经典的凭证窃取攻击链。强烈建议禁止使用。")
+            _add_r(
+                "高危组合：凭证读取 + 外部请求 = 典型数据外泄模式。"
+                "该 Skill 先读取了本地凭证/密钥文件，随后向外部域名发起请求，"
+                "这是经典的凭证窃取攻击链。强烈建议禁止使用。",
+                "HIGH RISK COMBINATION: Credential access + external requests = classic data exfiltration pattern. "
+                "This skill reads local credential/key files then makes requests to external domains — a classic credential theft attack chain. "
+                "Strongly recommend blocking.",
+            )
         if is_false_negative:
-            recommendations.append("该 Skill 通过了静态分析和 LLM 评估（被误判为安全），"
-                                   "仅在运行时沙箱中才暴露出恶意行为。这说明多阶段检测的重要性 — "
-                                   "对于此类善于伪装的 Skill，必须启用深度扫描（Docker 沙箱）才能有效识别。")
+            _add_r(
+                "该 Skill 通过了静态分析和 LLM 评估（被误判为安全），"
+                "仅在运行时沙箱中才暴露出恶意行为。这说明多阶段检测的重要性 — "
+                "对于此类善于伪装的 Skill，必须启用深度扫描（Docker 沙箱）才能有效识别。",
+                "This skill passed static analysis and LLM evaluation (false negative) — malicious behavior was only exposed in the runtime sandbox. "
+                "This demonstrates the importance of multi-stage detection. For skills that are good at disguising themselves, deep scanning (Docker sandbox) must be enabled.",
+            )
         if has_write_root:
-            recommendations.append("该 Skill 尝试向系统敏感路径写入文件，可能修改系统配置或植入后门。"
-                                   "建议：限制 Skill 的 write 工具权限，仅允许写入指定的输出目录。")
-    elif status == "WARNING":
-        recommendations.append("谨慎使用 — 检测到中等风险指标，建议在部署前进行人工审查。")
+            _add_r(
+                "该 Skill 尝试向系统敏感路径写入文件，可能修改系统配置或植入后门。"
+                "建议：限制 Skill 的 write 工具权限，仅允许写入指定的输出目录。",
+                "This skill attempts to write files to sensitive system paths, potentially modifying system configuration or planting backdoors. "
+                "Recommendation: Restrict the skill's write tool permissions to only allow writing to designated output directories.",
+            )
+    elif status in ("WARNING", "Medium Risk"):
+        _add_r(
+            "谨慎使用 — 检测到中等风险指标，建议在部署前进行人工审查。",
+            "Use with caution — medium risk indicators detected. Manual review recommended before deployment.",
+        )
         if has_external:
-            recommendations.append("检测到外部网络请求行为，虽未被判定为高危，但仍需确认目标域名是否在允许列表中。"
-                                   "建议：在生产环境中配置网络白名单，仅允许 Skill 访问已审核的域名。")
+            _add_r(
+                "检测到外部网络请求行为，虽未被判定为高危，但仍需确认目标域名是否在允许列表中。"
+                "建议：在生产环境中配置网络白名单，仅允许 Skill 访问已审核的域名。",
+                "External network request behavior detected. While not classified as high risk, verify target domains are on the allowlist. "
+                "Recommendation: Configure a network whitelist in production, only allowing the skill to access approved domains.",
+            )
         if has_credential:
-            recommendations.append("该 Skill 访问了凭证文件，请确认是否为必要操作。"
-                                   "建议：使用临时令牌或受限 API 密钥，避免暴露主密钥。")
-        recommendations.append("建议在生产环境中限制该 Skill 的工具权限（如禁用 exec/write），"
-                               "并保持 FangcunGuard 实时监控开启。")
-    elif status == "PASSED":
-        recommendations.append("该 Skill 通过所有安全检查，可在标准防护下安全使用。")
-        recommendations.append("建议在生产环境中保持 FangcunGuard 监控开启，提供持续运行时保护。"
-                               "即使当前检测安全，Skill 的行为可能因输入不同而变化。")
+            _add_r(
+                "该 Skill 访问了凭证文件，请确认是否为必要操作。"
+                "建议：使用临时令牌或受限 API 密钥，避免暴露主密钥。",
+                "This skill accessed credential files — verify this is necessary. "
+                "Recommendation: Use temporary tokens or restricted API keys to avoid exposing master keys.",
+            )
+        _add_r(
+            "建议在生产环境中限制该 Skill 的工具权限（如禁用 exec/write），"
+            "并保持 FangcunGuard 实时监控开启。",
+            "Recommendation: Restrict tool permissions for this skill in production (e.g. disable exec/write) and keep FangcunGuard real-time monitoring enabled.",
+        )
+    elif status in ("PASSED", "Safe", "SAFE"):
+        _add_r(
+            "该 Skill 通过所有安全检查，可在标准防护下安全使用。",
+            "This skill passed all security checks and can be safely used under standard protection.",
+        )
+        _add_r(
+            "建议在生产环境中保持 FangcunGuard 监控开启，提供持续运行时保护。"
+            "即使当前检测安全，Skill 的行为可能因输入不同而变化。",
+            "Recommendation: Keep FangcunGuard monitoring enabled in production for continuous runtime protection. "
+            "Even if currently detected as safe, skill behavior may vary with different inputs.",
+        )
     elif status == "TIMEOUT":
-        recommendations.append("执行超时 — 该 Skill 在规定时间内未完成执行，可能原因：死循环、资源耗尽、"
-                               "等待不可达的外部服务响应。建议：检查 Skill 逻辑，增加超时时间后重新测试，"
-                               "或在资源受限环境中设置更严格的执行上限。")
-    elif status == "INCONCLUSIVE":
-        recommendations.append("沙箱执行未能完成（可能是 Skill 依赖缺失或代码兼容性问题），"
-                               "已回退到静态分析结果。该结果不代表安全风险，仅表示无法通过运行时验证。")
-    elif status == "ERROR":
-        recommendations.append("执行过程中遇到错误，可能原因：环境依赖缺失、Skill 代码 bug、"
-                               "Docker 容器配置问题。建议：检查完整日志，确认所需的运行时依赖是否已安装。")
+        _add_r(
+            "执行超时 — 该 Skill 在规定时间内未完成执行，可能原因：死循环、资源耗尽、"
+            "等待不可达的外部服务响应。建议：检查 Skill 逻辑，增加超时时间后重新测试，"
+            "或在资源受限环境中设置更严格的执行上限。",
+            "Execution timeout — the skill did not complete within the time limit. "
+            "Possible causes: infinite loop, resource exhaustion, or waiting for unreachable external services. "
+            "Recommendation: Check skill logic, increase timeout and retest, or set stricter execution limits in resource-constrained environments.",
+        )
+    elif status in ("INCONCLUSIVE", "INCOMPLETE"):
+        _add_r(
+            "沙箱执行未能完成（可能是 Skill 依赖缺失或代码兼容性问题），"
+            "已回退到静态分析结果。该结果不代表安全风险，仅表示无法通过运行时验证。",
+            "Sandbox execution could not complete (possibly due to missing skill dependencies or code compatibility issues). "
+            "Fell back to static analysis results. This does not indicate a security risk, only that runtime verification was not possible.",
+        )
+    elif status in ("ERROR", "SANDBOX_FAILED"):
+        _add_r(
+            "执行过程中遇到错误，可能原因：环境依赖缺失、Skill 代码 bug、"
+            "Docker 容器配置问题。建议：检查完整日志，确认所需的运行时依赖是否已安装。",
+            "An error occurred during execution. Possible causes: missing environment dependencies, skill code bugs, or Docker container configuration issues. "
+            "Recommendation: Check full logs and verify required runtime dependencies are installed.",
+        )
 
     # Extract skill info from SKILL.md
     skill_desc = ""
@@ -194,6 +329,7 @@ def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe
         "false_negative": is_false_negative,
         "scan_time": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
         "source": "用户提交",
+        "source_en": "User Submitted",
         "latency": {
             "total": round(lat.get("total", 0), 2),
             "static": round(lat.get("static", 0), 2),
@@ -210,6 +346,7 @@ def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe
             "llm": {
                 "confidence": prescan.get("safety_confidence"),
                 "reason": prescan.get("llm_reason", ""),
+                "reason_en": prescan.get("llm_reason_en", ""),
             },
             "runtime": {
                 "status": runtime.get("status", "N/A") if runtime else "SKIPPED",
@@ -220,6 +357,7 @@ def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe
         },
         "warnings": warnings,
         "recommendations": recommendations,
+        "recommendations_en": recommendations_en,
     }
 
     if batch_id:
@@ -227,17 +365,31 @@ def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe
 
     # Persist to SQLite
     from scan_db import save_scan
-    save_scan(report)
+    save_scan(report, skill_hash=skill_hash)
     return report
 
 
 async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
                                 use_llm: bool = True, use_runtime: bool = True,
-                                use_verify: bool = True):
+                                use_verify: bool = True, lang: str = "en"):
     """Generator that runs the real pipeline and yields SSE events."""
     settings = get_settings()
     _pipeline_start = time.time()
     _latency = {"total": 0, "static": 0, "llm": 0, "runtime": 0, "verify": 0}
+
+    # ══════════════════════════════════════════════════════════════
+    # Short-circuit: if identical skill was recently scanned, return cache
+    # ══════════════════════════════════════════════════════════════
+    from scan_db import compute_skill_hash, find_by_skill_hash
+    skill_hash = compute_skill_hash(skill_path)
+    if skill_hash:
+        cached = find_by_skill_hash(skill_hash, lang=lang)
+        if cached:
+            yield _sse_event(0, "cached", "已缓存结果（跳过扫描）", {"report": cached})
+            yield _sse_event(0, "report", "扫描报告", {"report": cached})
+            yield _sse_event(0, "done", "Pipeline complete (cached)",
+                             {"prescan": None, "runtime": None, "verify": None, "cached": True})
+            return
 
     # ══════════════════════════════════════════════════════════════
     # Stage 1: Static Analysis + LLM Safety Scoring
@@ -403,8 +555,13 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
     if safety_verdict == "UNSAFE":
         _latency["total"] = time.time() - _pipeline_start
         yield _sse_event(1, "result", "Skill 判定为不安全 — 跳过沙箱测试")
-        report = _build_report(prescan_data, {}, False, False, latency=_latency)
+        report = _build_report(prescan_data, {}, False, False, latency=_latency,
+                                lang=lang, skill_hash=skill_hash)
         report["recommendations"] = [
+            "静态分析和 LLM 评估判定该 Skill 为不安全，请勿使用。",
+            "审查上述发现后再考虑任何使用方式。",
+        ]
+        report["recommendations_en"] = [
             "DO NOT USE this skill — static analysis and/or LLM flagged it as UNSAFE.",
             "Review the findings above before considering any use.",
         ]
@@ -419,10 +576,15 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
         _latency["total"] = time.time() - _pipeline_start
         yield _sse_event(1, "result",
             f"LLM confidence {safety_confidence:.2f} >= {settings.sandbox_threshold} — clearly safe, skipping sandbox")
-        report = _build_report(prescan_data, {}, True, True, latency=_latency)
+        report = _build_report(prescan_data, {}, True, True, latency=_latency,
+                                lang=lang, skill_hash=skill_hash)
         report["recommendations"] = [
             "该 Skill 通过静态分析和 LLM 高置信度评估，判定为安全，无需沙箱验证。",
             "建议在生产环境中保持 FangcunGuard 监控开启，提供持续运行时保护。",
+        ]
+        report["recommendations_en"] = [
+            "This skill passed static analysis and high-confidence LLM evaluation; no sandbox verification needed.",
+            "Recommendation: Keep FangcunGuard monitoring enabled in production for continuous runtime protection.",
         ]
         yield _sse_event(0, "report", "扫描报告", {"report": report})
         await asyncio.sleep(0.2)
@@ -436,7 +598,8 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
     if not use_runtime:
         _latency["total"] = time.time() - _pipeline_start
         scanner_safe = safety_verdict == "SAFE"
-        report = _build_report(prescan_data, {}, scanner_safe, True, latency=_latency)
+        report = _build_report(prescan_data, {}, scanner_safe, True, latency=_latency,
+                                lang=lang, skill_hash=skill_hash)
         yield _sse_event(0, "report", "扫描报告", {"report": report})
         await asyncio.sleep(0.2)
         yield _sse_event(0, "done", "Pipeline complete (runtime disabled)",
@@ -447,704 +610,81 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
     await asyncio.sleep(0.3)
 
     docker_image = settings.docker_image
-    docker_model = settings.docker_model
-    azure_url = settings.docker_api_url
-    azure_key = settings.docker_api_key
-    timeout_sec = settings.phase2_timeout
-    prep_timeout = settings.phase1_timeout
-    max_retries = settings.max_retries
-
-    # Extract provider, model_id, and profile from model string: "provider/model@profile"
-    _model_provider = docker_model.split("/")[0] if "/" in docker_model else "openai-responses"
-    _model_profile = docker_model.split("@")[1] if "@" in docker_model else "default"
-    _model_id = docker_model.split("/", 1)[1].split("@")[0] if "/" in docker_model else docker_model.split("@")[0]
-    # Determine API type: "responses" for openai-responses/azure-openai-responses, else "chat"
-    _api_type = "openai-responses" if "responses" in _model_provider else "openai"
-    retry_delay = settings.retry_delay
-    guard_plugin_api_url = settings.guard_plugin_api_url
-    guard_plugin_api_key = settings.guard_plugin_api_key
-
-    yield _sse_event(2, "step", f"Building sandbox container {docker_image}...")
+    yield _sse_event(2, "step", f"Starting sandbox with image {docker_image}...")
     await asyncio.sleep(0.2)
 
-    import subprocess as _subprocess
+    import queue as _queue
+    import functools as _functools
+    runtime_result = {"status": "ERROR", "details": []}
     try:
-        from guardian import (build_phase2_prompt, extract_skill_short_name,
-                              PHASE1_PROMPT, PHASE2_MARKER,
-                              _extract_tool_calls,
-                              _detect_incomplete_execution, _detect_agent_crash,
-                              extract_env_requirements)
+        from guardian import run_two_phase_test
 
         skill_folder = Path(skill_path).name
-        skill_dir = str(skill_path)
+        skills_parent = str(Path(skill_path).parent)
         output_dir = os.path.join(str(SCRIPT_DIR), "output")
         os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, f"skill_{skill_folder}.txt")
-        phase1_file = os.path.join(output_dir, f"skill_{skill_folder}_phase1.txt")
 
-        for f in [output_file, phase1_file]:
-            if os.path.exists(f):
-                os.remove(f)
+        _msg_queue: _queue.Queue = _queue.Queue()
 
-        phase2_prompt = build_phase2_prompt(skill_folder, skill_dir)
-        phase2_for_heredoc = phase2_prompt.replace("\\", "\\\\")
-        phase1_for_heredoc = PHASE1_PROMPT.replace("\\", "\\\\")
-        total_timeout = prep_timeout + timeout_sec
+        def _on_progress(kind, msg):
+            _msg_queue.put((kind, msg))
 
-        inner_script = f"""
-# ── Copy RO skill to writable location ──
-cp -a /root/.openclaw/skills/test-skill-src /root/.openclaw/skills/test-skill
-
-# ── Setup: config + sample files ──
-echo "===SETUP_START==="
-echo "[setup] Fixing missing dependencies..."
-# strtok3 is pre-installed in the image; skip npm install
-test -d /opt/openclaw/node_modules/strtok3 || (cd /opt/openclaw && npm install --no-audit --no-fund strtok3 > /dev/null 2>&1)
-echo "[setup] Patching SDK for Azure model-router compatibility..."
-RESP_JS="/opt/openclaw/node_modules/@mariozechner/pi-ai/dist/providers/openai-responses.js"
-if [ -f "$RESP_JS" ]; then
-    sed -i 's|baseURL: model.baseUrl,|baseURL: model.baseUrl, defaultQuery: {{"api-version": "2025-04-01-preview"}},|' "$RESP_JS"
-    echo "[setup] SDK patched: api-version query param added"
-fi
-echo "[setup] Configuring OpenClaw gateway (mode=local, model={docker_model})..."
-cat > /root/.openclaw/openclaw.json <<'EOFJSON'
-{{"gateway":{{"mode":"local"}},"agents":{{"defaults":{{"model":{{"primary":"{docker_model}"}},"elevatedDefault":"on"}}}},"tools":{{"allow":["read","edit","write","exec","process","gateway","sessions_spawn","web_search","web_fetch"],"elevated":{{"enabled":true,"allowFrom":{{"{_model_provider}":["*"]}}}}}}}}
-EOFJSON
-echo "[setup] Gateway config written"
-echo "[setup] Merging elevated config into runtime config.json..."
-python3 -c "
-import json
-p='/root/.config/openclaw/config.json'
-try:
-    with open(p) as f: cfg=json.load(f)
-except: cfg={{}}
-cfg['tools']={{'allow':['read','edit','write','exec','process','gateway','sessions_spawn','web_search','web_fetch'],'elevated':{{'enabled':True,'allowFrom':{{'{_model_provider}':['*']}}}}}}
-cfg.setdefault('agents',{{}}).setdefault('defaults',{{}})['elevatedDefault']='on'
-with open(p,'w') as f: json.dump(cfg,f)
-"
-echo "[setup] Elevated permissions configured"
-echo "[setup] Configuring auth profile..."
-mkdir -p /root/.openclaw/agents/main/agent
-cat > /root/.openclaw/agents/main/agent/auth-profiles.json <<'EOFAUTH'
-{{"profiles":{{"{_model_profile}":{{"type":"api_key","provider":"{_model_provider}","key":"{azure_key}","baseUrl":"{azure_url}"}}}},"order":{{"{_model_provider}":["{_model_profile}"]}}}}
-EOFAUTH
-echo "[setup] Auth profile written"
-echo "[setup] Registering custom model in models.json..."
-cat > /root/.openclaw/agents/main/agent/models.json <<'EOFMODELS'
-{{"providers":{{"{_model_provider}":{{"baseUrl":"{azure_url}","apiKey":"{azure_key}","api":"{_api_type}","headers":{{"api-key":"{azure_key}"}},"models":[{{"id":"{_model_id}","name":"{_model_id}","contextWindow":200000,"maxTokens":32768}}]}}}}}}
-EOFMODELS
-echo "[setup] models.json written"
-echo "[setup] Creating sample data files..."
-echo "Sample document content for testing." > /tmp/sample.txt
-echo '{{"name":"test","data":[1,2,3]}}' > /tmp/sample.json
-printf 'name,value\\nAlice,100\\nBob,200\\n' > /tmp/sample.csv
-mkdir -p /tmp/myproject && echo 'print("hello")' > /tmp/myproject/main.py && echo '# My Project' > /tmp/myproject/README.md
-echo "[setup] Sample files ready"
-echo "[setup] Trimming workspace context files..."
-truncate -s 0 /root/.openclaw/workspace/AGENTS.md
-truncate -s 0 /root/.openclaw/workspace/HEARTBEAT.md
-truncate -s 0 /root/.openclaw/workspace/IDENTITY.md
-truncate -s 0 /root/.openclaw/workspace/USER.md
-truncate -s 0 /root/.openclaw/workspace/TOOLS.md
-echo "[setup] Workspace trimmed"
-echo "[setup] Mounting skill: {skill_folder} → /root/.openclaw/skills/test-skill/"
-ls -la /root/.openclaw/skills/test-skill/ 2>/dev/null | head -8
-# ── Guard plugin API key replacement (if configured) ──
-GUARD_PLUGIN_FILE="/root/.openclaw/extensions/openclaw-fangcun-guard/index.ts"
-if [ -n "$GUARD_PLUGIN_API_KEY" ] && [ -f "$GUARD_PLUGIN_FILE" ]; then
-    echo "[setup] Replacing hardcoded Guard plugin API key..."
-    sed -i 's/sk-xxai-PbBmNhMNCM4pG9mF9GqHQM7U518clbYq4E08scSVln50Pyv49tp7n2SL/'"$GUARD_PLUGIN_API_KEY"'/g' "$GUARD_PLUGIN_FILE"
-    echo "[setup] Guard plugin API key updated"
-fi
-echo "===SETUP_DONE==="
-
-# ── Patch: force elevated permissions allowed in --local mode ──
-# 1. Patch resolveElevatedPermissions (used by gateway/reply flows)
-for _df in /opt/openclaw/dist/reply-*.js /opt/openclaw/dist/pi-embedded-*.js /opt/openclaw/dist/compact-*.js; do
-    [ -f "$_df" ] && sed -i 's/function resolveElevatedPermissions(params)/function resolveElevatedPermissions(params){{return{{enabled:true,allowed:true,failures:[]}};}}function _orig_resolveElevatedPermissions(params)/' "$_df"
-done
-# 2. Patch createExecTool: --local agent path skips resolveElevatedPermissions entirely
-#    (runAgentAttempt never passes bashElevated), so defaults.elevated is undefined.
-#    Force it to enabled/allowed when missing.
-for _df in /opt/openclaw/dist/pi-embedded-*.js /opt/openclaw/dist/reply-*.js /opt/openclaw/dist/compact-*.js; do
-    [ -f "$_df" ] && sed -i 's/const elevatedDefaults = defaults?.elevated;/const elevatedDefaults = defaults?.elevated || {{enabled:true,allowed:true,defaultLevel:"on"}};/' "$_df"
-done
-
-# ── Phase 1: Disable Guardian, prepare environment ──
-echo "[phase1] Disabling FangcunGuard for safe environment preparation..."
-echo "===PHASE1_START==="
-mv /root/.openclaw/extensions/openclaw-fangcun-guard \
-   /tmp/_disabled_guardian 2>/dev/null || true
-echo "[phase1] Guardian disabled"
-
-cat > /tmp/phase1_prompt.txt <<'EOFP1PROMPT'
-{phase1_for_heredoc}
-EOFP1PROMPT
-
-echo "[phase1] Starting OpenClaw agent for environment setup..."
-echo "[phase1] Model: {docker_model} | Timeout: {prep_timeout}s"
-
-timeout {prep_timeout} node /opt/openclaw/openclaw.mjs agent --local \
-    --session-id "prep-{skill_folder}" \
-    -m "$(cat /tmp/phase1_prompt.txt)" --json 2>&1
-
-PHASE1_EXIT=$?
-echo "[phase1] Agent exited with code $PHASE1_EXIT"
-echo "===PHASE1_EXIT_CODE=$PHASE1_EXIT==="
-
-echo "[phase1] Cleaning up session data..."
-rm -rf /root/.openclaw/sessions/prep-* 2>/dev/null
-rm -rf /root/.openclaw/agents/main/sessions/prep-* 2>/dev/null
-rm -f /root/.openclaw/workspace/MEMORY.md
-rm -f /root/.openclaw/workspace/BOOTSTRAP.md
-truncate -s 0 /root/.openclaw/workspace/TOOLS.md
-truncate -s 0 /root/.openclaw/workspace/AGENTS.md
-truncate -s 0 /root/.openclaw/workspace/HEARTBEAT.md
-truncate -s 0 /root/.openclaw/workspace/IDENTITY.md
-truncate -s 0 /root/.openclaw/workspace/USER.md
-echo "[phase1] Cleanup complete, ready for Phase 2"
-
-# ── Phase 2: Re-enable Guardian, execute skill ──
-echo "[phase2] Re-enabling FangcunGuard for monitored execution..."
-mv /tmp/_disabled_guardian \
-   /root/.openclaw/extensions/openclaw-fangcun-guard 2>/dev/null || true
-echo "[phase2] Guardian restored — active monitoring ON"
-echo "[phase2] Loading execution prompt for skill: {skill_folder}..."
-cat > /tmp/phase2_prompt.txt <<'EOFPROMPT'
-{phase2_for_heredoc}
-EOFPROMPT
-echo "[phase2] Prompt loaded ($(wc -c < /tmp/phase2_prompt.txt) bytes)"
-
-echo "{PHASE2_MARKER}"
-
-MAX_RETRIES={max_retries}
-RETRY_DELAY={retry_delay}
-ATTEMPT=0
-
-while [ $ATTEMPT -le $MAX_RETRIES ]; do
-    ATTEMPT=$((ATTEMPT + 1))
-    echo "===PHASE2_ATTEMPT=$ATTEMPT==="
-    echo "[phase2] Execution attempt $ATTEMPT — Agent + Guardian starting... (timeout: {timeout_sec}s)"
-    rm -rf /root/.openclaw/sessions/test-* 2>/dev/null
-    rm -rf /root/.openclaw/agents/main/sessions/test-* 2>/dev/null
-
-    timeout {timeout_sec} node /opt/openclaw/openclaw.mjs agent --local \
-        --session-id "test-{skill_folder}" \
-        -m "$(cat /tmp/phase2_prompt.txt)" --json 2>&1 | tee /tmp/phase2_output.txt
-
-    if grep -q '"stopReason": "stop"' /tmp/phase2_output.txt || grep -q '"stopReason":"stop"' /tmp/phase2_output.txt; then
-        echo "[phase2] Agent completed (stopReason=stop)"
-        break
-    fi
-    # Any non-success result triggers repair
-    if [ $ATTEMPT -le $MAX_RETRIES ]; then
-        echo "===PHASE2_FAILED_ATTEMPT=$ATTEMPT==="
-        ERROR_MSGS=$(grep -iE 'Error:|error:|ModuleNotFoundError|ImportError|command not found|No such file|Permission denied|Cannot find|npm ERR|stopReason.*error' /tmp/phase2_output.txt | tail -5)
-        if [ -z "$ERROR_MSGS" ]; then
-            ERROR_MSGS="Agent did not complete successfully (no stopReason=stop found in output)"
-        fi
-        echo "[retry] Phase 2 failed, running Phase 1 repair with error context..."
-        echo "[retry] Error: $ERROR_MSGS"
-        mv /root/.openclaw/extensions/openclaw-fangcun-guard /tmp/_disabled_guardian 2>/dev/null || true
-        rm -rf /root/.openclaw/sessions/repair-* 2>/dev/null
-        rm -rf /root/.openclaw/agents/main/sessions/repair-* 2>/dev/null
-        echo "===PHASE1_REPAIR_START==="
-        timeout {prep_timeout} node /opt/openclaw/openclaw.mjs agent --local \
-            --session-id "repair-{skill_folder}" \
-            -m "The skill at /root/.openclaw/skills/test-skill/ failed to execute. Here is the error output:
-
-$ERROR_MSGS
-
-Please fix the environment so the skill can run successfully:
-1. Read the skill files to understand what dependencies/tools it needs
-2. Install any missing packages (pip install, npm install, apt-get install, etc.)
-3. Create any missing config files or directories the skill expects
-4. Do NOT run the skill itself - only fix the environment
-
-Work directory: /root/.openclaw/skills/test-skill/" --json 2>&1
-        echo "===PHASE1_REPAIR_DONE==="
-        rm -rf /root/.openclaw/sessions/repair-* 2>/dev/null
-        rm -rf /root/.openclaw/agents/main/sessions/repair-* 2>/dev/null
-        rm -f /root/.openclaw/workspace/MEMORY.md
-        rm -f /root/.openclaw/workspace/BOOTSTRAP.md
-        truncate -s 0 /root/.openclaw/workspace/TOOLS.md 2>/dev/null
-        truncate -s 0 /root/.openclaw/workspace/AGENTS.md 2>/dev/null
-        truncate -s 0 /root/.openclaw/workspace/HEARTBEAT.md 2>/dev/null
-        truncate -s 0 /root/.openclaw/workspace/IDENTITY.md 2>/dev/null
-        truncate -s 0 /root/.openclaw/workspace/USER.md 2>/dev/null
-        mv /tmp/_disabled_guardian /root/.openclaw/extensions/openclaw-fangcun-guard 2>/dev/null || true
-        echo "[retry] Environment repaired, retrying Phase 2..."
-    else
-        break
-    fi
-done
-"""
-        container_ts = int(time.time())
-        container_name = f"guardian-2p-{skill_folder}-{container_ts}"
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "--name", container_name,
-            "--entrypoint", "bash",
-            "-v", f"{skill_dir}:/root/.openclaw/skills/test-skill-src:ro",
-            "-e", f"AZURE_OPENAI_BASE_URL={azure_url}",
-            "-e", f"AZURE_OPENAI_API_KEY={azure_key}",
-        ]
-        # Inject dummy API keys for skills that require external credentials
-        required_envs = extract_env_requirements(skill_dir)
-        for env_name in required_envs:
-            docker_cmd.extend(["-e", f"{env_name}=sk-proj-Rf4kPl8cHdWm2xNqYvTb7jAs9eUoZiLg3nXpKw6tMy"])
-        # Guard plugin env vars (if configured)
-        if guard_plugin_api_url:
-            docker_cmd += ["-e", f"FANGCUN_GUARD_API_URL={guard_plugin_api_url}"]
-        if guard_plugin_api_key:
-            docker_cmd += ["-e", f"GUARD_PLUGIN_API_KEY={guard_plugin_api_key}"]
-        # Deep trace mode: enable after_tool content analysis; otherwise disable
-        if not use_verify:
-            docker_cmd += ["-e", "FANGCUN_DISABLE_AFTER_TOOL=1"]
-        docker_cmd += [docker_image, "-c", inner_script]
-
-        max_total_timeout = total_timeout + (max_retries * (timeout_sec + retry_delay)) + 60
-
-        _BLACKLIST_LOW_RISK_RE = re.compile(r'Tool check result: risk=\d+, label=low_risk')
-
-        tool_call_re = re.compile(r'\[fangcun-guard\]\s+Tool call:\s+(\w+)\s*\|\s*(\{.*)')
-        blacklist_re = re.compile(r'Blacklist hit:\s*(.*)')
-        risk_re = re.compile(r'Tool check result: risk=(\d+), label=(\w+)')
-        api_log_re = re.compile(r'\[API-LOG\]\s+(.*)')
-        plugin_load_re = re.compile(r'\[fangcun-guard\]\s+Plugin loading')
-        registered_re = re.compile(r'\[fangcun-guard\]\s+Registered user')
-
-        yield _sse_event(2, "step", f"启动 Docker 容器: {container_name[:40]}...")
-
-        proc = await asyncio.create_subprocess_exec(
-            *docker_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(
+            None,
+            _functools.partial(
+                run_two_phase_test,
+                skill_folder=skill_folder,
+                skills_dir=skills_parent,
+                output_dir=output_dir,
+                enable_after_tool=use_verify,
+                on_progress=_on_progress,
+            ),
         )
 
-        start_time = time.time()
-        output_lines = []
-        in_phase1 = False
-        in_phase2 = False
-        blacklist_seen = False
-        low_risk_alert = False
-        phase1_lines = []
-        phase2_lines = []
-        guardian_loaded = False
-        agent_started = False
-
-        event_queue: asyncio.Queue = asyncio.Queue()
-        docker_done = asyncio.Event()
-
-        _LLM_LABEL = docker_model.split("/")[1].split("@")[0] if "/" in docker_model else docker_model
-
-        async def _read_docker_output():
-            nonlocal in_phase1, in_phase2, blacklist_seen, low_risk_alert
-            nonlocal guardian_loaded, agent_started
-            in_setup = False
+        # Stream progress SSE events while the blocking sandbox runs in executor
+        while not future.done():
             try:
-                async for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace")
-                    output_lines.append(line)
+                kind, msg = _msg_queue.get(timeout=0.3)
+                yield _sse_event(2, kind, msg)
+            except _queue.Empty:
+                pass
+            await asyncio.sleep(0.05)
 
-                    if "===SETUP_START===" in line:
-                        in_setup = True
-                        await event_queue.put(_sse_event(2, "step", "正在初始化沙箱环境..."))
-                        continue
-                    if "===SETUP_DONE===" in line:
-                        in_setup = False
-                        await event_queue.put(_sse_event(2, "step", "沙箱环境初始化完成"))
-                        continue
-                    if in_setup and line.strip().startswith("[setup]"):
-                        msg = line.strip()[7:].strip()
-                        # Filter out internal debug messages
-                        _skip_keywords = (
-                            "Replacing hardcoded", "API key updated", "API key",
-                            "SDK patched", "Patching SDK", "Fixing missing",
-                            "auth profile", "models.json", "Gateway config",
-                            "Configuring OpenClaw", "Configuring auth",
-                            "Registering custom", "Trimming workspace",
-                            "Workspace trimmed", "Sample files ready",
-                        )
-                        if msg and not any(k in msg for k in _skip_keywords):
-                            await event_queue.put(_sse_event(2, "step", msg))
-                        continue
-
-                    if line.strip().startswith("[phase1]"):
-                        msg = line.strip()[8:].strip()
-                        if msg:
-                            await event_queue.put(_sse_event(2, "step", msg))
-                        continue
-                    if line.strip().startswith("[phase2]") and "PHASE2_ATTEMPT" not in line:
-                        msg = line.strip()[8:].strip()
-                        if msg:
-                            await event_queue.put(_sse_event(2, "step", msg))
-                        continue
-
-                    if "===PHASE1_START===" in line:
-                        in_phase1 = True
-                        await event_queue.put(_sse_event(2, "step", "阶段一: Agent 准备环境（Guardian 关闭）..."))
-                        continue
-                    if "===PHASE1_EXIT_CODE=" in line:
-                        in_phase1 = False
-                        exit_match = re.search(r'EXIT_CODE=(\d+)', line)
-                        code = exit_match.group(1) if exit_match else "?"
-                        await event_queue.put(_sse_event(2, "step", f"阶段一完成 (exit={code})，环境就绪"))
-                        continue
-
-                    if in_phase1:
-                        phase1_lines.append(line)
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-                        tc_p1 = tool_call_re.search(line)
-                        if tc_p1:
-                            tool_name_p1 = tc_p1.group(1)
-                            args_str_p1 = tc_p1.group(2)
-                            if tool_name_p1 == "read":
-                                fp = re.search(r'"file_path"\s*:\s*"([^"]+)"', args_str_p1)
-                                if fp:
-                                    await event_queue.put(_sse_event(2, "step", f"[prep] read → {fp.group(1)}"))
-                            elif tool_name_p1 == "exec":
-                                cm = re.search(r'"command"\s*:\s*"((?:[^"\\\\]|\\\\.){0,200})"', args_str_p1)
-                                if cm:
-                                    await event_queue.put(_sse_event(2, "step", f"[prep] exec → {cm.group(1)[:150]}"))
-                            elif tool_name_p1 in ("write", "edit"):
-                                fp = re.search(r'"file_path"\s*:\s*"([^"]+)"', args_str_p1)
-                                if fp:
-                                    await event_queue.put(_sse_event(2, "step", f"[prep] {tool_name_p1} → {fp.group(1)}"))
-                            else:
-                                await event_queue.put(_sse_event(2, "step", f"[prep] {tool_name_p1} → ..."))
-                            continue
-
-                        raw_tool = re.search(r'"(?:tool|name)"\s*:\s*"(read|write|exec|edit|elevated|web_fetch|web_search)"', stripped)
-                        if raw_tool:
-                            t = raw_tool.group(1)
-                            fp = re.search(r'"file_path"\s*:\s*"([^"]+)"', stripped)
-                            cmd = re.search(r'"command"\s*:\s*"((?:[^"\\\\]|\\\\.){0,200})"', stripped)
-                            if fp:
-                                await event_queue.put(_sse_event(2, "step", f"[prep] {t} → {fp.group(1)}"))
-                            elif cmd:
-                                await event_queue.put(_sse_event(2, "step", f"[prep] {t} → {cmd.group(1)[:150]}"))
-                            else:
-                                await event_queue.put(_sse_event(2, "step", f"[prep] {t} → ..."))
-                            continue
-
-                        text_match = re.search(r'"text":\s*"([^"]{10,200})', stripped)
-                        if text_match:
-                            snippet = text_match.group(1)[:120]
-                            await event_queue.put(_sse_event(2, "step", f"[prep] {snippet}"))
-                            continue
-
-                        if stripped.startswith("[tools]") or stripped.startswith("[agent]"):
-                            await event_queue.put(_sse_event(2, "step", f"[prep] {stripped[:150]}"))
-                            continue
-                        if not stripped.startswith(("{", "}", "[", "]", '"')) and len(stripped) > 15:
-                            await event_queue.put(_sse_event(2, "step", f"[prep] {stripped[:150]}"))
-                            continue
-                        continue
-
-                    if PHASE2_MARKER in line:
-                        in_phase2 = True
-                        await event_queue.put(_sse_event(2, "step", "Phase 2: Executing skill with FangcunGuard monitoring..."))
-                        continue
-
-                    if not in_phase2:
-                        continue
-
-                    phase2_lines.append(line)
-
-                    if not guardian_loaded and plugin_load_re.search(line):
-                        guardian_loaded = True
-                        await event_queue.put(_sse_event(2, "step", "FangcunGuard 插件已加载，监控已开启"))
-                        continue
-                    if not agent_started and registered_re.search(line):
-                        agent_started = True
-                        await event_queue.put(_sse_event(2, "step", f"Agent ({_LLM_LABEL}) 正在执行 Skill 工作流..."))
-                        continue
-
-                    tc = tool_call_re.search(line)
-                    if tc:
-                        tool_name = tc.group(1)
-                        args_str = tc.group(2)
-                        if tool_name == "read":
-                            file_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', args_str)
-                            if file_match:
-                                await event_queue.put(_sse_event(2, "step", f"[tool] read → {file_match.group(1)}"))
-                        elif tool_name == "exec":
-                            cmd_match = re.search(r'"command"\s*:\s*"((?:[^"\\\\]|\\\\.){0,200})"', args_str)
-                            if cmd_match:
-                                cmd = cmd_match.group(1)[:150]
-                                if "curl" in cmd and not any(h in cmd for h in ["localhost", "127.0.0.1"]):
-                                    await event_queue.put(_sse_event(2, "alert", f"[tool] exec → {cmd}"))
-                                else:
-                                    await event_queue.put(_sse_event(2, "step", f"[tool] exec → {cmd}"))
-                        elif tool_name == "write":
-                            file_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', args_str)
-                            if file_match:
-                                await event_queue.put(_sse_event(2, "step", f"[tool] write → {file_match.group(1)}"))
-                        continue
-
-                    bl = blacklist_re.search(line)
-                    if bl:
-                        blacklist_seen = True
-                        await event_queue.put(_sse_event(2, "finding", f"黑名单命中: {bl.group(1)}"))
-                        continue
-
-                    rk = risk_re.search(line)
-                    if rk:
-                        r_level = int(rk.group(1))
-                        label = rk.group(2)
-                        if r_level >= 2:
-                            await event_queue.put(_sse_event(2, "finding", f"风险评估: 等级={r_level}, 标签={label}"))
-                        continue
-
-                    # 内容审查响应 (after_tool content_check)
-                    if "[AFTER]" in line and "content_check response:" in line:
-                        _r3 = re.search(r'"risk_level"\s*:\s*(\d+)', line)
-                        _cat = re.search(r'"level_two"\s*:\s*"([^"]*)"', line)
-                        _rlvl = int(_r3.group(1)) if _r3 else 0
-                        _cname = _cat.group(1) if _cat else "未知"
-                        if _rlvl >= 2:
-                            await event_queue.put(_sse_event(2, "finding",
-                                f"内容审查: 风险等级={_rlvl}, 类别={_cname}, 判定={'拒绝' if _rlvl >= 3 else '警告'}"))
-
-                    # 输出风险检出 (Output risk detected)
-                    if "Output risk detected:" in line:
-                        _rmsg = line.split("Output risk detected:")[-1].strip()[:150]
-                        await event_queue.put(_sse_event(2, "finding", f"内容风险检出: {_rmsg}"))
-
-                    api_m = api_log_re.search(line)
-                    if api_m:
-                        api_text = api_m.group(1)[:120]
-                        if "tool_check output" in api_text or "response" in api_text.lower():
-                            await event_queue.put(_sse_event(2, "api", f"← FangcunGuard 响应: {api_text}"))
-                        elif "tool_check input" in api_text or "content_check" in api_text:
-                            await event_queue.put(_sse_event(2, "api", f"→ FangcunGuard API: 正在分析操作链..."))
-                        continue
-
-                    if blacklist_seen and _BLACKLIST_LOW_RISK_RE.search(line):
-                        low_risk_alert = True
-
-                    if time.time() - start_time > max_total_timeout:
-                        await event_queue.put(_sse_event(2, "alert",
-                            f"[超时] 超过 {max_total_timeout}s，正在终止容器"))
-                        try:
-                            kill_proc = await asyncio.create_subprocess_exec(
-                                "docker", "kill", container_name,
-                                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                            await asyncio.wait_for(kill_proc.wait(), timeout=10)
-                        except Exception:
-                            pass
-                        break
-            finally:
-                docker_done.set()
-                await event_queue.put(None)
-
-        _seen_session_lines: int = 0
-        _seen_workspace_files: set = set()
-        _initial_files_captured = False
-
-        async def _snapshot_initial_workspace():
-            nonlocal _initial_files_captured
+        # Drain any remaining queued events
+        while not _msg_queue.empty():
             try:
-                p = await asyncio.create_subprocess_exec(
-                    "docker", "exec", container_name, "bash", "-c",
-                    "find /root/.openclaw/workspace -maxdepth 3 -type f "
-                    "-not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                out, _ = await asyncio.wait_for(p.communicate(), timeout=5)
-                if out:
-                    for fp in out.decode(errors="replace").strip().split("\n"):
-                        if fp.strip():
-                            _seen_workspace_files.add(fp.strip())
-                _initial_files_captured = True
-            except Exception:
-                _initial_files_captured = True
-
-        async def _heartbeat():
-            nonlocal _seen_session_lines, _initial_files_captured
-            await asyncio.sleep(6)
-            if not _initial_files_captured:
-                await _snapshot_initial_workspace()
-            while not docker_done.is_set():
-                elapsed = round(time.time() - start_time)
-                if not in_phase1 and not in_phase2:
-                    await event_queue.put(_sse_event(2, "step", f"Docker container starting... ({elapsed}s)"))
-                    await asyncio.sleep(5)
-                    continue
-                label = "prep" if in_phase1 else "tool"
-                session_prefix = "prep-" if in_phase1 else "test-"
-                found_new = False
-                try:
-                    p = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_name, "bash", "-c",
-                        f"ls /root/.openclaw/agents/main/sessions/{session_prefix}*.jsonl 2>/dev/null | tail -1",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                    out, _ = await asyncio.wait_for(p.communicate(), timeout=3)
-                    jsonl_file = out.decode(errors="replace").strip() if out else ""
-                    if jsonl_file:
-                        skip = _seen_session_lines + 1
-                        p2 = await asyncio.create_subprocess_exec(
-                            "docker", "exec", container_name, "bash", "-c",
-                            f"tail -n +{skip} '{jsonl_file}' 2>/dev/null | head -20",
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                        out2, _ = await asyncio.wait_for(p2.communicate(), timeout=5)
-                        if out2:
-                            new_lines = [l for l in out2.decode(errors="replace").strip().split("\n") if l.strip()]
-                            for raw_line in new_lines:
-                                _seen_session_lines += 1
-                                tc_names = re.findall(r'"name"\s*:\s*"(read|write|exec|edit|elevated|web_fetch|web_search)"', raw_line)
-                                if not tc_names:
-                                    tc_names = re.findall(r'"toolName"\s*:\s*"(read|write|exec|edit|elevated|web_fetch|web_search)"', raw_line)
-                                if tc_names:
-                                    tn = tc_names[-1]
-                                    fp_matches = re.findall(r'"file_path"\s*:\s*"([^"]+)"', raw_line)
-                                    cmd_matches = re.findall(r'"command"\s*:\s*"((?:[^"\\]|\\.){0,200})"', raw_line)
-                                    if tn in ("read", "write", "edit") and fp_matches:
-                                        await event_queue.put(_sse_event(2, "step", f"[{label}] {tn} → {fp_matches[-1]}"))
-                                        found_new = True
-                                    elif tn == "exec" and cmd_matches:
-                                        c = cmd_matches[-1][:120].replace("\\n", " ").replace("\\t", " ")
-                                        is_ext = "curl" in c and "localhost" not in c and "127.0.0.1" not in c
-                                        await event_queue.put(_sse_event(2, "alert" if is_ext else "step", f"[{label}] exec → {c}"))
-                                        found_new = True
-                                    elif tn not in ("read", "write", "edit", "exec"):
-                                        await event_queue.put(_sse_event(2, "step", f"[{label}] {tn}"))
-                                        found_new = True
-                except Exception:
-                    pass
-                try:
-                    p = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_name, "bash", "-c",
-                        "find /root/.openclaw/workspace -maxdepth 3 -type f "
-                        "-not -path '*/.git/*' -not -path '*/node_modules/*' "
-                        "-not -path '*/.openclaw/*' -not -path '*/.fangcun/*' 2>/dev/null",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                    out, _ = await asyncio.wait_for(p.communicate(), timeout=3)
-                    if out:
-                        for fline in out.decode(errors="replace").strip().split("\n"):
-                            fp = fline.strip()
-                            if fp and fp not in _seen_workspace_files:
-                                _seen_workspace_files.add(fp)
-                                short = fp.replace("/root/.openclaw/workspace/", "~/")
-                                await event_queue.put(_sse_event(2, "step", f"[{label}] new file → {short}"))
-                                found_new = True
-                except Exception:
-                    pass
-                await asyncio.sleep(6)
-
-        reader_task = asyncio.create_task(_read_docker_output())
-        heartbeat_task = asyncio.create_task(_heartbeat())
-
-        while True:
-            event = await event_queue.get()
-            if event is None:
+                kind, msg = _msg_queue.get_nowait()
+                yield _sse_event(2, kind, msg)
+            except _queue.Empty:
                 break
-            yield event
 
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        await reader_task
-        await proc.wait()
-        elapsed = round(time.time() - start_time, 1)
-
-        full_output = "".join(output_lines)
-        phase1_output_text = "".join(phase1_lines)
-        phase2_output_text = "".join(phase2_lines)
-
-        with open(phase1_file, "w", encoding="utf-8", errors="replace") as f:
-            f.write(phase1_output_text)
-        with open(output_file, "w", encoding="utf-8", errors="replace") as f:
-            f.write(phase2_output_text)
-
-        tool_calls_parsed = _extract_tool_calls(phase2_output_text)
-        incomplete = _detect_incomplete_execution(phase2_output_text, tool_calls_parsed)
-        agent_crashed = _detect_agent_crash(phase2_output_text)
-
-        p2_lines = phase2_output_text.split("\n")
-        blacklist_hits_list = [l for l in p2_lines if "Blacklist hit" in l]
-        blocks = [l for l in p2_lines if re.search(
-            r'Risk Level [23]|"blocked":\s*true|write failed.*FangcunGuard|exec failed.*FangcunGuard|read failed.*FangcunGuard', l)]
-        content_risks = [l for l in p2_lines if ("fangcun-guard]" in l.lower() or "[FangcunGuard]" in l) and "risk detected" in l.lower()]
-        high_content_risks = [l for l in content_risks if re.search(r'risk=[3-9]', l)]
-        blocks.extend(high_content_risks)
-        tool_checks = [l for l in p2_lines if "Tool check result: risk=" in l]
-        low_risk_hits = sum(1 for l in tool_checks if "label=low_risk" in l)
-        medium_risk_hits = sum(1 for l in tool_checks if "label=medium_risk" in l or "risk=2" in l)
-        high_risk_hits = sum(1 for l in tool_checks if "label=high_risk" in l or "risk=3" in l)
-        # Broad scan: any p2 line with "Output risk detected" + risk=3 counts as high risk (covers after_tool content review)
-        all_risk3 = sum(1 for l in p2_lines if "risk detected" in l.lower() and re.search(r'risk=[3-9]', l))
-        if all_risk3 > high_risk_hits:
-            high_risk_hits = all_risk3
-        if blocks:
-            runtime_status = "DANGER"
-        elif high_risk_hits >= 1:
-            runtime_status = "DANGER"
-        elif content_risks:
-            runtime_status = "DANGER"
-        elif time.time() - start_time > max_total_timeout:
-            runtime_status = "TIMEOUT"
-        elif agent_crashed and not blocks and not blacklist_hits_list:
-            runtime_status = "INCONCLUSIVE"
-        elif blacklist_hits_list or medium_risk_hits >= 1 or low_risk_hits >= 1:
-            runtime_status = "WARNING"
-        elif incomplete:
-            runtime_status = "INCOMPLETE"
-        else:
-            runtime_status = "PASSED"
-
+        result = await future
+        runtime_status = result.get("status", "ERROR")
         runtime_result = {
-            "skill": skill_folder,
+            "skill": result.get("skill", skill_folder),
             "status": runtime_status,
-            "elapsed_sec": elapsed,
-            "blacklist_hits": len(blacklist_hits_list),
-            "blocks": len(blocks),
-            "content_risks": len(content_risks),
-            "agent_crashed": agent_crashed,
-            "early_stopped": False,
-            "low_risk_alert": low_risk_alert,
-            "details": [l.strip()[:200] for l in (blacklist_hits_list + blocks + content_risks)[:10]],
-            "output_file": output_file,
-            "phase1_file": phase1_file,
+            "elapsed_sec": result.get("elapsed_sec", 0),
+            "blacklist_hits": result.get("blacklist_hits", 0),
+            "blocks": result.get("blocks", 0),
+            "content_risks": result.get("content_risks", 0),
+            "agent_crashed": result.get("agent_crashed", False),
+            "retries_used": result.get("retries_used", 0),
+            "early_stopped": result.get("early_stopped", False),
+            "low_risk_alert": result.get("low_risk_alert", False),
+            "details": result.get("details", []),
+            "output_file": result.get("output_file"),
+            "phase1_file": result.get("phase1_file"),
         }
 
-        for ind in cap_indicators:
-            yield _sse_event(2, "finding", ind)
-
-        # FangcunGuard API call (optional)
-        if (cap_indicators or len(blacklist_hits_list) > 0) and settings.fangcun_api_url and settings.fangcun_api_key:
-            yield _sse_event(2, "api", "→ FangcunGuard API: 正在发送操作链进行审计...")
-            await asyncio.sleep(0.3)
-            try:
-                import urllib.request
-                req_data = json.dumps({
-                    "skill_name": skill_name,
-                    "skill_description": skill_name,
-                    "operations": [ind for ind in cap_indicators[:10]],
-                    "current_operation": cap_indicators[0] if cap_indicators else "",
-                }).encode()
-                req = urllib.request.Request(settings.fangcun_api_url, data=req_data,
-                    headers={"Content-Type": "application/json",
-                             "Authorization": f"Bearer {settings.fangcun_api_key}"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    api_result = json.loads(resp.read().decode())
-                    r_level = api_result.get("risk_level", 0)
-                    action = api_result.get("action", "pass")
-                    reason = api_result.get("reason", "")
-                    yield _sse_event(2, "api",
-                        f"← FangcunGuard 响应: risk_level={r_level}, action={action}, \"{reason[:80]}\"")
-            except Exception as e:
-                yield _sse_event(2, "api", f"← FangcunGuard API 不可用: {e}")
-
-        yield _sse_event(2, "result", f"运行时结论: {runtime_status}" +
-            (f" — {'; '.join(cap_indicators[:2])}" if cap_indicators else ""),
-            {"status": runtime_status, "details": runtime_result.get("details", [])})
+        _details = result.get("details", []) or []
+        _verdict_suffix = f" — {'; '.join(_details[:2])}" if _details else ""
+        yield _sse_event(2, "result",
+            f"运行时结论: {runtime_status}{_verdict_suffix}",
+            {"status": runtime_status, "details": _details})
 
     except Exception as e:
+        import traceback; traceback.print_exc()
         yield _sse_event(2, "finding", f"Docker 运行时错误: {e}")
         yield _sse_event(2, "result", f"运行时结论: ERROR — {e}")
         runtime_result = {"status": "ERROR", "details": [str(e)]}
@@ -1160,7 +700,8 @@ done
         _latency["total"] = time.time() - _pipeline_start
         scanner_safe = safety_verdict == "SAFE"
         runtime_safe = runtime_result.get("status") == "PASSED"
-        report = _build_report(prescan_data, runtime_result, scanner_safe, runtime_safe, latency=_latency)
+        report = _build_report(prescan_data, runtime_result, scanner_safe, runtime_safe,
+                                latency=_latency, lang=lang, skill_hash=skill_hash)
         yield _sse_event(0, "report", "扫描报告", {"report": report})
         await asyncio.sleep(0.2)
         yield _sse_event(0, "done", "流水线完成",
@@ -1194,7 +735,8 @@ done
     await asyncio.sleep(0.3)
 
     _latency["total"] = time.time() - _pipeline_start
-    report = _build_report(prescan_data, runtime_result, scanner_safe, runtime_safe, latency=_latency)
+    report = _build_report(prescan_data, runtime_result, scanner_safe, runtime_safe,
+                            latency=_latency, lang=lang, skill_hash=skill_hash)
     yield _sse_event(0, "report", "扫描报告", {"report": report})
     await asyncio.sleep(0.2)
 
@@ -1266,6 +808,50 @@ async def get_batch(batch_id: str):
         return {"error": "Batch not found"}, 404
     skills = get_batch_skills(batch_id, limit=2000)
     return {**batch, "skills": skills["records"]}
+
+
+@app.post("/api/batch/upload")
+async def batch_upload(file: UploadFile = File(...)):
+    """Accept a .zip / .tar.gz archive of skill folders, extract it, and report
+    the discovered skills. The caller then points `/api/batch/{batch_id}/stream`
+    at the returned `skills_dir` to run the actual scan pipeline.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="guardian_batch_")
+    file_path = os.path.join(tmp_dir, file.filename or "upload.zip")
+
+    with open(file_path, "wb") as f:
+        content_bytes = await file.read()
+        f.write(content_bytes)
+
+    extract_dir = os.path.join(tmp_dir, "extracted")
+    os.makedirs(extract_dir, exist_ok=True)
+
+    lower = file_path.lower()
+    if lower.endswith(".zip"):
+        with zipfile.ZipFile(file_path, "r") as zf:
+            zf.extractall(extract_dir)
+    elif lower.endswith((".tar.gz", ".tgz")):
+        import tarfile
+        with tarfile.open(file_path, "r:gz") as tf:
+            tf.extractall(extract_dir)
+    else:
+        return {"error": "Unsupported archive format. Use .zip, .tar.gz or .tgz."}, 400
+
+    # Walk extract_dir, collecting every directory that contains SKILL.md.
+    # Skip nested SKILL.md discoveries (only the outermost skill folder counts).
+    skill_dirs = []
+    for root, dirs, files in os.walk(extract_dir):
+        if "SKILL.md" in files:
+            p = Path(root)
+            is_nested = any(pp in skill_dirs for pp in p.parents)
+            if not is_nested:
+                skill_dirs.append(p)
+
+    return {
+        "skills_dir": extract_dir,
+        "skill_count": len(skill_dirs),
+        "skills": [{"name": p.name, "path": str(p)} for p in sorted(skill_dirs)],
+    }
 
 
 @app.get("/api/batch/{batch_id}/stream")
@@ -1406,8 +992,21 @@ async def batch_scan_stream(
     )
 
 
-async def _run_docker_sandbox(skill_path: str, settings, use_verify: bool = True) -> dict:
-    """Run Docker sandbox for a single skill (non-streaming). Returns runtime_result dict."""
+async def _run_docker_sandbox(skill_path: str, settings, use_verify: bool = True,
+                              on_progress=None) -> dict:
+    """Run Docker sandbox for a single skill (non-streaming). Returns runtime_result dict.
+
+    on_progress: optional callable (kind: str, msg: str) -> None invoked at
+      milestones. Callers (e.g. `_run_pipeline_stream`) can push these into an
+      asyncio.Queue to surface progress as SSE events.
+    """
+    def _emit(kind: str, msg: str):
+        if on_progress:
+            try:
+                on_progress(kind, msg)
+            except Exception:
+                pass  # never let user callback break the pipeline
+
     from guardian import (build_phase2_prompt, PHASE1_PROMPT, PHASE2_MARKER,
                           _extract_tool_calls,
                           _detect_incomplete_execution, _detect_agent_crash)
@@ -1595,6 +1194,7 @@ done
     max_total_timeout = total_timeout + (max_retries * (timeout_sec + retry_delay)) + 60
     start_time = time.time()
 
+    _emit("step", f"Launching sandbox container ({container_name})...")
     proc = await asyncio.create_subprocess_exec(
         *docker_cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -1609,17 +1209,38 @@ done
     in_phase2 = False
     blacklist_seen = False
     low_risk_alert = False
+    _phase1_announced = False
 
     try:
         async for raw_line in proc.stdout:
             line = raw_line.decode("utf-8", errors="replace")
             output_lines.append(line)
 
+            if not in_phase2:
+                if not _phase1_announced and "===PHASE1_START===" in line:
+                    _emit("step", "Phase 1 started (environment prep, Guardian disabled)...")
+                    _phase1_announced = True
+                if "===PHASE1_EXIT_CODE" in line:
+                    _emit("step", "Phase 1 complete, switching to Phase 2...")
+
             if PHASE2_MARKER in line:
                 in_phase2 = True
+                _emit("step", "Phase 2 started (skill execution under Guardian)")
                 continue
             if in_phase2:
                 phase2_lines.append(line)
+
+                if "===PHASE2_ATTEMPT=" in line:
+                    m_attempt = re.search(r"PHASE2_ATTEMPT=(\d+)", line)
+                    if m_attempt:
+                        _emit("step", f"Phase 2 attempt {m_attempt.group(1)}...")
+                if "===PHASE2_RETRY" in line:
+                    _emit("alert", "Agent crashed — retrying")
+                if "[FangcunGuard]" in line or "fangcun-guard]" in line.lower():
+                    if "risk detected" in line.lower():
+                        _emit("finding", line.strip()[:200])
+                    elif "tool_check output_raw:" in line:
+                        _emit("api", line.strip()[:200])
 
             bl = blacklist_re_p.search(line)
             if bl:
@@ -1629,6 +1250,7 @@ done
                 low_risk_alert = True
 
             if time.time() - start_time > max_total_timeout:
+                _emit("alert", f"Timeout exceeded ({max_total_timeout}s), killing container")
                 try:
                     kill_proc = await asyncio.create_subprocess_exec(
                         "docker", "kill", container_name,
@@ -1641,6 +1263,7 @@ done
         pass
 
     await proc.wait()
+    _emit("step", "Execution finished, analyzing output...")
     elapsed = round(time.time() - start_time, 1)
 
     phase2_output_text = "".join(phase2_lines)
@@ -1695,8 +1318,16 @@ done
 
 
 async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: bool = False,
-                           use_verify: bool = True, batch_id: str = None) -> dict:
+                           use_verify: bool = True, batch_id: str = None,
+                           lang: str = "en") -> dict:
     """Run a single skill scan (non-streaming) and return the report dict."""
+    from scan_db import compute_skill_hash, find_by_skill_hash
+    skill_hash = compute_skill_hash(skill_path)
+    # Short-circuit on cache hit (same behavior as SSE pipeline).
+    if skill_hash:
+        cached = find_by_skill_hash(skill_hash, lang=lang)
+        if cached:
+            return cached
     settings = get_settings()
     _pipeline_start = time.time()
     _latency = {"total": 0, "static": 0, "llm": 0, "runtime": 0, "verify": 0}
@@ -1835,7 +1466,8 @@ async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: b
     _latency["total"] = time.time() - _pipeline_start
     scanner_safe = safety_verdict == "SAFE"
     report = _build_report(prescan_data, runtime_result, scanner_safe, runtime_safe,
-                           latency=_latency, batch_id=batch_id)
+                           latency=_latency, batch_id=batch_id,
+                           lang=lang, skill_hash=skill_hash)
     return report
 
 
@@ -1922,10 +1554,11 @@ async def scan_stream(
     use_llm: bool = Query(True),
     use_runtime: bool = Query(True),
     use_verify: bool = Query(True),
+    lang: str = Query("en", description="Language for report text: 'zh' or 'en'"),
 ):
     async def event_generator():
         async for event in _run_pipeline_stream(
-            skill_path, policy, use_llm, use_runtime, use_verify
+            skill_path, policy, use_llm, use_runtime, use_verify, lang=lang,
         ):
             yield event
     return StreamingResponse(

@@ -90,7 +90,7 @@ export function ScanModal({ isOpen, onClose, isScanning, skillPath, config, onSc
             policy={config.policy}
             useLlm={config.useLlm}
             useRuntime={config.useRuntime}
-            useVerify={config.useVerify}
+            enableAfterTool={config.enableAfterTool}
             onComplete={onScanComplete}
           />
         </div>

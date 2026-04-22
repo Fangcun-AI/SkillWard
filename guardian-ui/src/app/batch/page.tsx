@@ -48,11 +48,15 @@ export default function BatchPage() {
   const router = useRouter();
   const [historyMap, setHistoryMap] = useState<Record<string, string>>({});
   const [skillsDir, setSkillsDir] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [discoveredSkills, setDiscoveredSkills] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [concurrency, setConcurrency] = useState(6);
   const [scanMode, setScanMode] = useState<"static" | "sandbox" | "deep">("deep");
   const useLlm = true;
   const useRuntime = scanMode === "sandbox" || scanMode === "deep";
-  const useVerify = scanMode === "deep";
+  const enableAfterTool = scanMode === "deep";
 
   const [scanning, setScanning] = useState(false);
   const [results, setResults] = useState<SkillResult[]>([]);
@@ -67,8 +71,35 @@ export default function BatchPage() {
   // Filter state
   const [filterVerdict, setFilterVerdict] = useState<string>("all");
 
-  const startScan = useCallback(() => {
-    if (!skillsDir.trim()) return;
+  const startScan = useCallback(async () => {
+    let dir = skillsDir.trim();
+
+    // Upload archive first if user selected a file and didn't specify a path.
+    if (selectedFile && !dir) {
+      setUploading(true);
+      setErrorMsg("");
+      try {
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+        const uploadRes = await fetch(`${API_BASE}/api/batch/upload`, { method: "POST", body: formData });
+        if (!uploadRes.ok) {
+          setErrorMsg(`Upload failed: HTTP ${uploadRes.status}`);
+          setUploading(false);
+          return;
+        }
+        const uploadData = await uploadRes.json();
+        dir = uploadData.skills_dir;
+        setSkillsDir(dir);
+        setDiscoveredSkills(uploadData.skill_count || 0);
+      } catch (err: unknown) {
+        setErrorMsg(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+        setUploading(false);
+        return;
+      }
+      setUploading(false);
+    }
+
+    if (!dir) return;
     setScanning(true);
     setResults([]);
     setSummary(null);
@@ -79,11 +110,11 @@ export default function BatchPage() {
 
     const batchId = `batch-${Date.now().toString(36)}`;
     const params = new URLSearchParams({
-      skills_dir: skillsDir.trim(),
+      skills_dir: dir,
       concurrency: String(concurrency),
       use_llm: String(useLlm),
       use_runtime: String(useRuntime),
-      use_verify: String(useVerify),
+      use_verify: String(enableAfterTool),
     });
 
     const controller = new AbortController();
@@ -130,7 +161,7 @@ export default function BatchPage() {
         }
         setScanning(false);
       });
-  }, [skillsDir, concurrency, scanMode]);
+  }, [skillsDir, selectedFile, concurrency, scanMode]);
 
   const handleSSE = useCallback((evt: { stage: number; type: string; text: string; data?: Record<string, unknown> }) => {
     setLogs((prev) => [...prev, evt.text]);
@@ -273,17 +304,54 @@ export default function BatchPage() {
           {/* Input form */}
           <div className="card-white rounded-xl border border-stone-200 p-6 mb-6">
             <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4">
-              {/* Path input */}
+              {/* Path input OR archive upload */}
               <div>
                 <label className="block text-xs font-semibold text-stone-500 mb-1.5">{t("batch.dir_label")}</label>
-                <input
-                  type="text"
-                  value={skillsDir}
-                  onChange={(e) => setSkillsDir(e.target.value)}
-                  placeholder={t("batch.dir_placeholder")}
-                  className="w-full px-4 py-2.5 rounded-lg border border-stone-200 bg-stone-50 text-sm text-stone-800 font-mono placeholder:text-stone-300 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-200 focus:outline-none transition-all"
-                  disabled={scanning}
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={skillsDir}
+                    onChange={(e) => { setSkillsDir(e.target.value); if (e.target.value) setSelectedFile(null); }}
+                    placeholder={t("batch.dir_placeholder")}
+                    className="flex-1 px-4 py-2.5 rounded-lg border border-stone-200 bg-stone-50 text-sm text-stone-800 font-mono placeholder:text-stone-300 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-200 focus:outline-none transition-all"
+                    disabled={scanning || uploading}
+                  />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".zip,.tar.gz,.tgz"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) { setSelectedFile(f); setSkillsDir(""); setDiscoveredSkills(0); }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={scanning || uploading}
+                    className="shrink-0 px-4 py-2.5 rounded-lg border border-stone-200 bg-white text-sm font-semibold text-stone-700 hover:border-cyan-400 hover:text-cyan-600 transition-all disabled:opacity-40"
+                  >
+                    {t("batch.upload_zip")}
+                  </button>
+                </div>
+                {selectedFile && (
+                  <div className="mt-2 flex items-center gap-2 text-xs text-stone-500">
+                    <span className="font-mono text-stone-700">{selectedFile.name}</span>
+                    <span>({(selectedFile.size / 1024).toFixed(1)} KB)</span>
+                    {discoveredSkills > 0 && (
+                      <span className="text-emerald-600">
+                        — {t("batch.skills_discovered", { n: discoveredSkills })}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => { setSelectedFile(null); setDiscoveredSkills(0); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                      className="text-stone-400 hover:text-red-500 transition-colors"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Controls row */}
@@ -324,10 +392,10 @@ export default function BatchPage() {
                 {!scanning ? (
                   <button
                     onClick={startScan}
-                    disabled={!skillsDir.trim()}
+                    disabled={!skillsDir.trim() && !selectedFile || uploading}
                     className="px-6 py-2.5 rounded-lg bg-cyan-600 text-white text-sm font-bold hover:bg-cyan-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
-                    {t("batch.start")}
+                    {uploading ? t("batch.uploading") : t("batch.start")}
                   </button>
                 ) : (
                   <button

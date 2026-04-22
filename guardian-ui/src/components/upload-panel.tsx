@@ -12,7 +12,7 @@ export interface ScanConfig {
   policy: string;
   useLlm: boolean;
   useRuntime: boolean;
-  useVerify: boolean;
+  enableAfterTool: boolean;
 }
 
 interface UploadPanelProps {
@@ -28,7 +28,7 @@ export function UploadPanel({ onSubmit, isScanning, onScanModeChange }: UploadPa
   const policy = "balanced";
   const llmAnalysis = true;
   const runtimeTest = scanMode === "sandbox" || scanMode === "deep";
-  const verifyFN = scanMode === "deep";
+  const enableAfterTool = scanMode === "deep";
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [selectedFileCount, setSelectedFileCount] = useState(0);
@@ -36,7 +36,7 @@ export function UploadPanel({ onSubmit, isScanning, onScanModeChange }: UploadPa
   const [localPath, setLocalPath] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const scanConfig: ScanConfig = { policy, useLlm: llmAnalysis, useRuntime: runtimeTest, useVerify: verifyFN };
+  const scanConfig: ScanConfig = { policy, useLlm: llmAnalysis, useRuntime: runtimeTest, enableAfterTool };
 
   const handleSubmit = async () => {
     if (localPath.trim()) {
