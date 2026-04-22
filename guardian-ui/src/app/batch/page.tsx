@@ -5,30 +5,9 @@ import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { useI18n, LanguageToggle } from "@/lib/i18n";
+import { useBatchScan } from "@/lib/batch-scan-context";
 
 const API_BASE = process.env.NEXT_PUBLIC_GUARDIAN_API || "http://localhost:8899";
-
-interface SkillResult {
-  skill_name: string;
-  verdict: string;
-  false_negative: boolean;
-  latency: number;
-  findings: number;
-  progress: number;
-  error?: string;
-}
-
-interface BatchSummary {
-  batch_id: string;
-  total_skills: number;
-  scanned: number;
-  safe: number;
-  unsafe: number;
-  error: number;
-  false_negatives: number;
-  latency_total: number;
-  latency_avg: number;
-}
 
 const VERDICT_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   PASSED: { bg: "bg-emerald-50", text: "text-emerald-600", border: "border-emerald-200" },
@@ -58,37 +37,47 @@ export default function BatchPage() {
   const useRuntime = scanMode === "sandbox" || scanMode === "deep";
   const enableAfterTool = scanMode === "deep";
 
-  const [scanning, setScanning] = useState(false);
-  const [results, setResults] = useState<SkillResult[]>([]);
-  const [summary, setSummary] = useState<BatchSummary | null>(null);
-  const [totalSkills, setTotalSkills] = useState(0);
-  const [scannedCount, setScannedCount] = useState(0);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [logs, setLogs] = useState<string[]>([]);
+  // Batch scan state is now global (survives route changes) — see BatchScanProvider.
+  const {
+    scanning,
+    results,
+    summary,
+    totalSkills,
+    scannedCount,
+    errorMsg,
+    logs,
+    startScan: startBatchScan,
+    stopScan: stopBatchScan,
+  } = useBatchScan();
+
+  const [uploadError, setUploadError] = useState("");
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   // Filter state
   const [filterVerdict, setFilterVerdict] = useState<string>("all");
 
-  const startScan = useCallback(async () => {
+  const handleStartClick = useCallback(async () => {
     let dir = skillsDir.trim();
 
     // If file selected, upload first
     if (selectedFile && !dir) {
       setUploading(true);
-      setErrorMsg("");
+      setUploadError("");
       try {
         const formData = new FormData();
         formData.append("file", selectedFile);
         const uploadRes = await fetch(`${API_BASE}/api/batch/upload`, { method: "POST", body: formData });
-        if (!uploadRes.ok) { setErrorMsg(`Upload failed: HTTP ${uploadRes.status}`); setUploading(false); return; }
+        if (!uploadRes.ok) {
+          setUploadError(`Upload failed: HTTP ${uploadRes.status}`);
+          setUploading(false);
+          return;
+        }
         const uploadData = await uploadRes.json();
         dir = uploadData.skills_dir;
         setSkillsDir(dir);
         setDiscoveredSkills(uploadData.skill_count || 0);
       } catch (err: unknown) {
-        setErrorMsg(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+        setUploadError(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
         setUploading(false);
         return;
       }
@@ -96,114 +85,14 @@ export default function BatchPage() {
     }
 
     if (!dir) return;
-    setScanning(true);
-    setResults([]);
-    setSummary(null);
-    setTotalSkills(0);
-    setScannedCount(0);
-    setErrorMsg("");
-    setLogs([]);
-
-    const batchId = `batch-${Date.now().toString(36)}`;
-    const params = new URLSearchParams({
-      skills_dir: dir,
-      concurrency: String(concurrency),
-      use_llm: String(useLlm),
-      use_runtime: String(useRuntime),
-      enable_after_tool: String(enableAfterTool),
+    startBatchScan({
+      skillsDir: dir,
+      concurrency,
+      useLlm,
+      useRuntime,
+      enableAfterTool,
     });
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const url = `${API_BASE}/api/batch/${batchId}/stream?${params}`;
-
-    fetch(url, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) {
-          setErrorMsg(`HTTP ${res.status}`);
-          setScanning(false);
-          return;
-        }
-        const reader = res.body?.getReader();
-        if (!reader) return;
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const evt = JSON.parse(line.slice(6));
-              handleSSE(evt);
-            } catch {
-              // ignore parse errors
-            }
-          }
-        }
-        setScanning(false);
-      })
-      .catch((err) => {
-        if (err.name !== "AbortError") {
-          setErrorMsg(err.message);
-        }
-        setScanning(false);
-      });
-  }, [skillsDir, selectedFile, concurrency, scanMode]);
-
-  const handleSSE = useCallback((evt: { stage: number; type: string; text: string; data?: Record<string, unknown> }) => {
-    setLogs((prev) => [...prev, evt.text]);
-
-    if (evt.type === "batch_start" && evt.data) {
-      setTotalSkills(evt.data.total as number);
-    } else if (evt.type === "skill_done" && evt.data) {
-      const d = evt.data as unknown as SkillResult;
-      setResults((prev) => {
-        const next = [...prev, d];
-        try { sessionStorage.setItem("batch_results", JSON.stringify(next)); } catch {}
-        return next;
-      });
-      setScannedCount(d.progress);
-    } else if (evt.type === "batch_done" && evt.data) {
-      const s = evt.data as unknown as BatchSummary;
-      setSummary(s);
-      try { sessionStorage.setItem("batch_summary", JSON.stringify(s)); } catch {}
-    } else if (evt.type === "error") {
-      setErrorMsg(evt.text);
-    }
-  }, []);
-
-  const stopScan = useCallback(() => {
-    abortRef.current?.abort();
-    setScanning(false);
-  }, []);
-
-  // Restore previous scan results from sessionStorage on mount
-  useEffect(() => {
-    try {
-      const savedResults = sessionStorage.getItem("batch_results");
-      const savedSummary = sessionStorage.getItem("batch_summary");
-      if (savedResults) {
-        const parsed = JSON.parse(savedResults) as SkillResult[];
-        if (parsed.length > 0) {
-          setResults(parsed);
-          setScannedCount(parsed.length);
-          setTotalSkills(parsed.length);
-        }
-      }
-      if (savedSummary) {
-        setSummary(JSON.parse(savedSummary) as BatchSummary);
-      }
-    } catch {}
-  }, []);
+  }, [skillsDir, selectedFile, concurrency, useLlm, useRuntime, enableAfterTool, startBatchScan]);
 
   // Fetch history to map skill_name -> id for linking to detail pages
   useEffect(() => {
@@ -393,7 +282,7 @@ export default function BatchPage() {
                 </div>
                 {!scanning ? (
                   <button
-                    onClick={startScan}
+                    onClick={handleStartClick}
                     disabled={(!selectedFile && !skillsDir.trim()) || uploading}
                     className="w-full py-3 rounded-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white text-sm font-bold hover:from-violet-700 hover:to-purple-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-violet-600/20"
                   >
@@ -401,7 +290,7 @@ export default function BatchPage() {
                   </button>
                 ) : (
                   <button
-                    onClick={stopScan}
+                    onClick={stopBatchScan}
                     className="w-full py-3 rounded-lg bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-all"
                   >
                     {t("batch.stop")}
@@ -447,9 +336,9 @@ export default function BatchPage() {
           )}
 
           {/* Error message */}
-          {errorMsg && (
+          {(errorMsg || uploadError) && (
             <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-600 text-sm">
-              {errorMsg}
+              {uploadError || errorMsg}
             </div>
           )}
 

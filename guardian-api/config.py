@@ -47,7 +47,7 @@ class GuardianSettings:
     sandbox_threshold: float = 0.9     # at/above this → clearly SAFE (skip sandbox)
 
     # Timeouts (seconds)
-    phase1_timeout: int = 300
+    phase1_timeout: int = 240
     phase2_timeout: int = 300
     max_retries: int = 2
     retry_delay: int = 10

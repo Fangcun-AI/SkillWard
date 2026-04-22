@@ -376,7 +376,7 @@ def _build_report(prescan: dict, runtime: dict, scanner_safe: bool, runtime_safe
 
 async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
                                 use_llm: bool = True, use_runtime: bool = True,
-                                use_verify: bool = True, lang: str = "en"):
+                                enable_after_tool: bool = True, lang: str = "en"):
     """Generator that runs the real pipeline and yields SSE events."""
     settings = get_settings()
     _pipeline_start = time.time()
@@ -644,7 +644,7 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
                 skill_folder=skill_folder,
                 skills_dir=skills_parent,
                 output_dir=output_dir,
-                enable_after_tool=use_verify,
+                enable_after_tool=enable_after_tool,
                 on_progress=_on_progress,
             ),
         )
@@ -703,7 +703,7 @@ async def _run_pipeline_stream(skill_path: str, policy: str = "balanced",
     # ══════════════════════════════════════════════════════════════
     _latency["runtime"] = runtime_result.get("elapsed_sec", 0)
 
-    if not use_verify:
+    if not enable_after_tool:
         _latency["total"] = time.time() - _pipeline_start
         scanner_safe = safety_verdict == "SAFE"
         runtime_safe = runtime_result.get("status") == "PASSED"
@@ -874,7 +874,7 @@ async def batch_scan_stream(
     concurrency: int = Query(4, description="Number of parallel scans"),
     use_llm: bool = Query(True),
     use_runtime: bool = Query(True),
-    use_verify: bool = Query(True),
+    enable_after_tool: bool = Query(True),
 ):
     """Batch scan: discover all skills in a directory, scan in parallel, stream progress."""
 
@@ -926,7 +926,7 @@ async def batch_scan_stream(
                 try:
                     report = await _run_single_scan(
                         str(skill_path), use_llm=use_llm, use_runtime=use_runtime,
-                        use_verify=use_verify, batch_id=bid)
+                        enable_after_tool=enable_after_tool, batch_id=bid)
                     update_batch_progress(bid, report)
                     completed["count"] += 1
                     # Use the report's skill_name (from scanner) so it matches the DB record
@@ -1005,7 +1005,7 @@ async def batch_scan_stream(
     )
 
 
-async def _run_docker_sandbox(skill_path: str, settings, use_verify: bool = True,
+async def _run_docker_sandbox(skill_path: str, settings, enable_after_tool: bool = True,
                               on_progress=None) -> dict:
     """Run Docker sandbox for a single skill (non-streaming). Returns runtime_result dict.
 
@@ -1200,7 +1200,7 @@ done
         docker_cmd += ["-e", f"FANGCUN_GUARD_API_URL={guard_plugin_api_url}"]
     if guard_plugin_api_key:
         docker_cmd += ["-e", f"GUARD_PLUGIN_API_KEY={guard_plugin_api_key}"]
-    if not use_verify:
+    if not enable_after_tool:
         docker_cmd += ["-e", "FANGCUN_DISABLE_AFTER_TOOL=1"]
     docker_cmd += [docker_image, "-c", inner_script]
 
@@ -1331,7 +1331,7 @@ done
 
 
 async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: bool = False,
-                           use_verify: bool = True, batch_id: str = None,
+                           enable_after_tool: bool = True, batch_id: str = None,
                            lang: str = "en") -> dict:
     """Run a single skill scan (non-streaming) and return the report dict."""
     from scan_db import compute_skill_hash, find_by_skill_hash
@@ -1468,7 +1468,7 @@ async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: b
     if use_runtime and needs_sandbox:
         _t0 = time.time()
         try:
-            runtime_result = await _run_docker_sandbox(skill_path, settings, use_verify=use_verify)
+            runtime_result = await _run_docker_sandbox(skill_path, settings, enable_after_tool=enable_after_tool)
             runtime_safe = runtime_result.get("status") == "PASSED"
         except Exception as e:
             runtime_result = {"status": "ERROR", "elapsed_sec": round(time.time() - _t0, 1),
@@ -1594,12 +1594,12 @@ async def scan_stream(
     policy: str = Query("balanced"),
     use_llm: bool = Query(True),
     use_runtime: bool = Query(True),
-    use_verify: bool = Query(True),
+    enable_after_tool: bool = Query(True),
     lang: str = Query("en", description="Language for report text: 'zh' or 'en'"),
 ):
     async def event_generator():
         async for event in _run_pipeline_stream(
-            skill_path, policy, use_llm, use_runtime, use_verify, lang=lang,
+            skill_path, policy, use_llm, use_runtime, enable_after_tool, lang=lang,
         ):
             yield event
     return StreamingResponse(

@@ -7,29 +7,9 @@ import { useRouter } from "next/navigation";
 import { useI18n, LanguageToggle } from "@/lib/i18n";
 import { UploadPanel, type ScanConfig, type ScanMode, type SubmitMode } from "@/components/upload-panel";
 import { ScanModal } from "@/components/scan-modal";
+import { useBatchScan } from "@/lib/batch-scan-context";
 
 const API_BASE = process.env.NEXT_PUBLIC_GUARDIAN_API || "http://localhost:8899";
-
-interface SkillResult {
-  skill_name: string;
-  verdict: string;
-  false_negative: boolean;
-  latency: number;
-  findings: number;
-  progress: number;
-}
-
-interface BatchSummary {
-  batch_id: string;
-  total_skills: number;
-  scanned: number;
-  safe: number;
-  unsafe: number;
-  error: number;
-  false_negatives: number;
-  latency_total: number;
-  latency_avg: number;
-}
 
 const VERDICT_STYLES: Record<string, { bg: string; text: string }> = {
   PASSED: { bg: "bg-emerald-50", text: "text-emerald-600" },
@@ -51,7 +31,7 @@ const VERDICT_STYLES: Record<string, { bg: string; text: string }> = {
 };
 
 export default function Home() {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const router = useRouter();
 
   // Single scan state
@@ -64,18 +44,23 @@ export default function Home() {
   const [scanMode, setScanMode] = useState<ScanMode>("sandbox");
   const [submitMode, setSubmitMode] = useState<SubmitMode>("single");
 
-  // Batch scan state
-  const [batchScanning, setBatchScanning] = useState(false);
-  const [batchResults, setBatchResults] = useState<SkillResult[]>([]);
-  const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
-  const [batchTotal, setBatchTotal] = useState(0);
-  const [batchScanned, setBatchScanned] = useState(0);
-  const [batchError, setBatchError] = useState("");
-  const [batchLogs, setBatchLogs] = useState<string[]>([]);
+  // Batch scan state now lives in the global BatchScanProvider so route changes
+  // don't lose progress. Rename fields to keep the existing JSX untouched.
+  const {
+    scanning: batchScanning,
+    results: batchResults,
+    summary: batchSummary,
+    totalSkills: batchTotal,
+    scannedCount: batchScanned,
+    errorMsg: batchError,
+    logs: batchLogs,
+    startScan,
+    stopScan: stopBatch,
+  } = useBatchScan();
+
   const [filterVerdict, setFilterVerdict] = useState("all");
   const [historyMap, setHistoryMap] = useState<Record<string, string>>({});
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   const handleSubmit = useCallback((path: string | undefined, config: ScanConfig) => {
     setSkillPath(path);
@@ -87,94 +72,20 @@ export default function Home() {
     }
   }, []);
 
-  const handleBatchStart = useCallback((skillsDir: string, concurrency: number, config: ScanConfig) => {
-    setBatchScanning(true);
-    setBatchResults([]);
-    setBatchSummary(null);
-    setBatchTotal(0);
-    setBatchScanned(0);
-    setBatchError("");
-    setBatchLogs([]);
-
-    const batchId = `batch-${Date.now().toString(36)}`;
-    const params = new URLSearchParams({
-      skills_dir: skillsDir,
-      concurrency: String(concurrency),
-      use_llm: String(config.useLlm),
-      use_runtime: String(config.useRuntime),
-      enable_after_tool: String(config.enableAfterTool),
-      lang: locale,
-    });
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    fetch(`${API_BASE}/api/batch/${batchId}/stream?${params}`, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) { setBatchError(`HTTP ${res.status}`); setBatchScanning(false); return; }
-        const reader = res.body?.getReader();
-        if (!reader) return;
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const evt = JSON.parse(line.slice(6));
-              setBatchLogs((prev) => [...prev, evt.text]);
-              if (evt.type === "batch_start" && evt.data) setBatchTotal(evt.data.total);
-              else if (evt.type === "skill_done" && evt.data) {
-                const d = evt.data as SkillResult;
-                setBatchResults((prev) => { const next = [...prev, d]; try { sessionStorage.setItem("batch_results", JSON.stringify(next)); } catch {} return next; });
-                setBatchScanned(d.progress);
-              } else if (evt.type === "batch_done" && evt.data) {
-                const s = evt.data as BatchSummary;
-                setBatchSummary(s);
-                try { sessionStorage.setItem("batch_summary", JSON.stringify(s)); } catch {}
-              } else if (evt.type === "error") setBatchError(evt.text);
-            } catch {}
-          }
-        }
-        setBatchScanning(false);
-      })
-      .catch(async (err) => {
-        if (err.name === "AbortError") { setBatchScanning(false); return; }
-        // Connection lost — check if batch actually completed on server
-        try {
-          const res = await fetch(`${API_BASE}/api/batch/${batchId}`);
-          const data = await res.json();
-          if (data.status === "done" || data.scanned >= data.total_skills) {
-            setBatchScanned(data.scanned);
-            setBatchTotal(data.total_skills);
-            setBatchSummary(data as BatchSummary);
-            setBatchScanning(false);
-            return;
-          }
-        } catch {}
-        setBatchError("连接中断，请刷新页面查看结果");
-        setBatchScanning(false);
-      });
-  }, []);
-
-  const stopBatch = useCallback(() => { abortRef.current?.abort(); setBatchScanning(false); }, []);
+  const handleBatchStart = useCallback(
+    (skillsDir: string, concurrency: number, config: ScanConfig) =>
+      startScan({
+        skillsDir,
+        concurrency,
+        useLlm: config.useLlm,
+        useRuntime: config.useRuntime,
+        enableAfterTool: config.enableAfterTool,
+      }),
+    [startScan]
+  );
 
   const handleScanComplete = useCallback(() => { setIsScanning(false); }, []);
   const handleModalClose = useCallback(() => { setModalOpen(false); setIsScanning(false); }, []);
-
-  // Restore batch results from session
-  useEffect(() => {
-    try {
-      const sr = sessionStorage.getItem("batch_results");
-      const ss = sessionStorage.getItem("batch_summary");
-      if (sr) { const p = JSON.parse(sr) as SkillResult[]; if (p.length > 0) { setBatchResults(p); setBatchScanned(p.length); setBatchTotal(p.length); } }
-      if (ss) setBatchSummary(JSON.parse(ss) as BatchSummary);
-    } catch {}
-  }, []);
 
   // Fetch history map for batch result links
   useEffect(() => {
