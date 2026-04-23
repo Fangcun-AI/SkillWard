@@ -23,3 +23,9 @@ skill-scanner/.devin/
 skill-scanner/guardian-ui.zip
 skill-scanner/evals/skills/guardian-output-*/
 skill-scanner/fangcun_test_*.py
+
+# Claude Code (personal config)
+.claude/
+
+# Sync backups
+*.bak-sync
