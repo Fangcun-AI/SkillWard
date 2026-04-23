@@ -104,10 +104,23 @@ def _init_tables(conn: sqlite3.Connection):
         conn.commit()
     except Exception:
         pass  # Column already exists
+    # Add skill_folder column (original extracted folder name, for log file lookup)
+    try:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN skill_folder TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+    # Add remediation_json column (cached AI-generated security patches)
+    try:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN remediation_json TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
 
 
 def compute_skill_hash(skill_path: str) -> str:
-    """SHA256 of all files in a skill directory, truncated to 32 hex chars."""
+    """Compute SHA256 hash of all files in a skill directory."""
+    import os
     h = hashlib.sha256()
     skill_dir = Path(skill_path)
     if not skill_dir.exists():
@@ -122,7 +135,7 @@ def compute_skill_hash(skill_path: str) -> str:
 
 
 def find_by_skill_hash(skill_hash: str, lang: str = "en") -> Optional[dict]:
-    """Return latest scan record with matching skill_hash; None if no usable cache."""
+    """Find the latest scan result with matching skill_hash and language."""
     if not skill_hash:
         return None
     conn = _get_conn()
@@ -133,15 +146,15 @@ def find_by_skill_hash(skill_hash: str, lang: str = "en") -> Optional[dict]:
     if not row:
         return None
     record = dict(row)
-    # Bilingual records (non-empty recommendations_en) serve both zh and en.
-    # Legacy single-lang records fall back to source-based language inference.
+    # Bilingual records (have non-empty recommendations_en) serve both zh and en.
+    # Legacy single-lang records: keep old source-based language filter for backward compat.
     recs_en_raw = record.get("recommendations_en") or ""
     is_bilingual = bool(recs_en_raw) and recs_en_raw not in ("", "[]")
     if not is_bilingual:
         source = record.get("source", "") or ""
         is_zh_record = any("一" < c < "鿿" for c in source)
         if (lang == "en" and is_zh_record) or (lang == "zh" and not is_zh_record):
-            return None
+            return None  # Legacy lang mismatch — don't use cache
     for field in ("stages", "capabilities", "warnings", "recommendations", "recommendations_en"):
         try:
             record[field] = json.loads(record[field])
@@ -178,8 +191,9 @@ def save_scan(report: dict, skill_hash: str = "") -> str:
             latency_total, latency_static, latency_llm, latency_runtime, latency_verify,
             stages, capabilities, warnings, recommendations, recommendations_en,
             findings_count, max_severity, safety_confidence,
-            runtime_status, blacklist_hits, blocks, skill_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            runtime_status, blacklist_hits, blocks, skill_hash,
+            skill_folder, remediation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         scan_id,
         report.get("skill_name", "unknown"),
@@ -206,9 +220,22 @@ def save_scan(report: dict, skill_hash: str = "") -> str:
         stages.get("runtime", {}).get("blacklist_hits", 0),
         stages.get("runtime", {}).get("blocks", 0),
         skill_hash,
+        report.get("skill_folder", ""),
+        report.get("remediation_json", ""),
     ))
     conn.commit()
     return scan_id
+
+
+def update_remediation(scan_id: str, remediations: list) -> bool:
+    """Persist generated security patches for a given scan_id. Returns True on success."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "UPDATE scan_results SET remediation_json = ? WHERE id = ?",
+        (json.dumps(remediations, ensure_ascii=False), scan_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def get_history(
@@ -257,6 +284,12 @@ def get_history(
                 record[field] = json.loads(record[field])
             except (json.JSONDecodeError, TypeError):
                 pass
+        # remediation_json is stored as raw JSON string; parse to list (or [] if absent/invalid)
+        _rj = record.get("remediation_json") or ""
+        try:
+            record["remediations"] = json.loads(_rj) if _rj else []
+        except (json.JSONDecodeError, TypeError):
+            record["remediations"] = []
         record["false_negative"] = bool(record["false_negative"])
         # Add latency summary
         record["latency"] = {

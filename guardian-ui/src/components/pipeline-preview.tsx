@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useI18n, type Locale } from "@/lib/i18n";
+import { RemediationPanel } from "./remediation-panel";
+import type { RemediationSuggestion } from "@/lib/types";
 
 /**
  * Translates backend Chinese report text to English when needed.
@@ -192,6 +194,7 @@ interface PipelinePreviewProps {
 }
 
 interface ReportData {
+  id?: string;
   verdict: string;
   skill_name: string;
   skill_description?: string;
@@ -207,6 +210,7 @@ interface ReportData {
   };
   warnings: { level: string; source: string; text: string; text_en?: string }[];
   recommendations: string[];
+  remediations?: RemediationSuggestion[];
 }
 
 interface LogEntry {
@@ -233,11 +237,54 @@ export function PipelinePreview({
   const [report, setReport] = useState<ReportData | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const isEn = locale === "en";
+
+  // ── Security Patch Suggestions (Medium Risk only, on-demand) ──
+  const [remediations, setRemediations] = useState<RemediationSuggestion[] | null>(null);
+  const [remLoading, setRemLoading] = useState(false);
+  const [remError, setRemError] = useState("");
+
+  const generateRemediations = useCallback(async () => {
+    if (!report?.id) return;
+    setRemLoading(true);
+    setRemError("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/scan/${report.id}/remediate?lang=${isEn ? "en" : "zh"}`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        if (data.error === "no_runtime_evidence") {
+          setRemError(t("report.remediation.no_evidence"));
+        } else {
+          setRemError(data.message || data.reason || t("report.remediation.failed"));
+        }
+        setRemediations([]);
+      } else {
+        setRemediations(data.remediations || []);
+      }
+    } catch {
+      setRemError(t("report.remediation.failed"));
+      setRemediations([]);
+    } finally {
+      setRemLoading(false);
+    }
+  }, [report?.id, isEn, t]);
+
   // Demo mode: stream hardcoded entries
 
   const addLine = useCallback((entry: LogEntry) => {
     if (entry.type === "report" && entry.data?.report) {
-      setReport(entry.data.report);
+      const r = entry.data.report;
+      setReport(r);
+      // If backend already cached LLM-generated patches (cache-hit on skill_hash),
+      // show them immediately without requiring a button click.
+      if (Array.isArray(r.remediations) && r.remediations.length > 0) {
+        setRemediations(r.remediations);
+      } else {
+        setRemediations(null);
+      }
       return; // Don't add report to log lines
     }
     setLines((prev) => [...prev, { ...entry, realTime: getTimestamp() }]);
@@ -251,6 +298,9 @@ export function PipelinePreview({
     setLines([]);
     setIsComplete(false);
     setReport(null);
+    setRemediations(null);
+    setRemError("");
+    setRemLoading(false);
 
     // Try connecting to real backend
     const params = new URLSearchParams({
@@ -864,8 +914,11 @@ export function PipelinePreview({
                     );
                   })}
                   <div className="flex-1 text-center border-l border-stone-200 pl-3">
-                    <div className="text-sm font-bold text-stone-800">{report.latency.total.toFixed(1)}s</div>
-                    <div className="text-[10px] text-stone-400 mt-1">{locale === "zh" ? "总计" : "Total"}</div>
+                    <div className="text-xs font-bold text-stone-700 mb-1">{report.latency.total.toFixed(1)}s</div>
+                    <div className="h-16 flex items-end justify-center">
+                      <div className="w-full max-w-[40px] rounded-t bg-gradient-to-t from-stone-700 to-stone-400 opacity-80" style={{ height: "100%" }} />
+                    </div>
+                    <div className="text-[10px] text-stone-500 font-bold mt-1">{locale === "zh" ? "总计" : "Total"}</div>
                   </div>
                 </div>
               </div>
@@ -962,6 +1015,57 @@ export function PipelinePreview({
             <span className="text-[10px] text-stone-400 font-mono">Skills Scanner AI Security Pipeline</span>
             <span className="text-[10px] text-stone-300 font-mono">{report.scan_time}</span>
           </div>
+        </div>
+      )}
+
+      {/* ── Security Patch Suggestions (Medium Risk only, on-demand) ── */}
+      {report && isComplete && report.verdict === "Medium Risk" && !report.false_negative && report.id && (
+        <div className="mt-6">
+          <h2 className="text-sm font-bold text-stone-800 mb-3 flex items-center gap-2">
+            <svg className="w-4 h-4 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            {t("report.remediation.title")}
+          </h2>
+
+          {remediations === null && !remLoading && (
+            <div className="card-white rounded-xl border border-stone-200 p-5">
+              <p className="text-xs text-stone-500 leading-relaxed mb-4">
+                {t("report.remediation.cta_hint")}
+              </p>
+              <button
+                onClick={generateRemediations}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700 shadow-md shadow-violet-600/20 transition-all"
+              >
+                {t("report.remediation.generate")}
+              </button>
+            </div>
+          )}
+
+          {remLoading && (
+            <div className="card-white rounded-xl border border-stone-200 p-5 flex items-center gap-3">
+              <span className="w-4 h-4 border-2 border-stone-300 border-t-violet-500 rounded-full animate-spin inline-block" />
+              <p className="text-xs text-stone-500">{t("report.remediation.loading")}</p>
+            </div>
+          )}
+
+          {remediations !== null && remediations.length > 0 && (
+            <RemediationPanel remediations={remediations} hideSkillName />
+          )}
+
+          {remediations !== null && remediations.length === 0 && !remLoading && (
+            <div className="card-white rounded-xl border border-stone-200 p-5 space-y-3">
+              <p className="text-xs text-stone-500">
+                {remError || t("report.remediation.empty")}
+              </p>
+              <button
+                onClick={generateRemediations}
+                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-stone-300 text-stone-600 hover:bg-stone-50 transition-colors"
+              >
+                {t("report.remediation.retry")}
+              </button>
+            </div>
+          )}
         </div>
       )}
       </div>{/* end scroll container */}

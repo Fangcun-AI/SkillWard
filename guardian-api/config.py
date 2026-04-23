@@ -47,14 +47,10 @@ class GuardianSettings:
     sandbox_threshold: float = 0.9     # at/above this → clearly SAFE (skip sandbox)
 
     # Timeouts (seconds)
-    phase1_timeout: int = 240
+    phase1_timeout: int = 300
     phase2_timeout: int = 300
     max_retries: int = 2
     retry_delay: int = 10
-
-    # FangcunGuard skill-audit API (optional, for 3-layer audit on host)
-    fangcun_api_url: str = ""
-    fangcun_api_key: str = ""
 
     # Guard plugin inside Docker container (runtime interception)
     guard_plugin_api_url: str = ""   # Override container's FANGCUN_GUARD_API_URL
@@ -63,7 +59,7 @@ class GuardianSettings:
     def to_dict(self, mask_keys: bool = False) -> dict:
         d = asdict(self)
         if mask_keys:
-            for k in ("llm_api_key", "docker_api_key", "fangcun_api_key", "guard_plugin_api_key"):
+            for k in ("llm_api_key", "docker_api_key", "guard_plugin_api_key"):
                 v = d.get(k, "")
                 if v and len(v) > 4:
                     d[k] = _MASK_PREFIX + v[-4:]
@@ -191,8 +187,6 @@ _ENV_MAP = {
     "GUARDIAN_PHASE2_TIMEOUT": "phase2_timeout",
     "GUARDIAN_MAX_RETRIES": "max_retries",
     "GUARDIAN_RETRY_DELAY": "retry_delay",
-    "GUARDIAN_FANGCUN_API_URL": "fangcun_api_url",
-    "GUARDIAN_FANGCUN_API_KEY": "fangcun_api_key",
     "GUARDIAN_GUARD_PLUGIN_API_URL": "guard_plugin_api_url",
     "GUARDIAN_GUARD_PLUGIN_API_KEY": "guard_plugin_api_key",
 }

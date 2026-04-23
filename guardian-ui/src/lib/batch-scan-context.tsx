@@ -12,7 +12,6 @@ import {
 import { useI18n } from "./i18n";
 
 const API_BASE = process.env.NEXT_PUBLIC_GUARDIAN_API || "http://localhost:8899";
-const STORAGE_KEY = "batch_scan_state";
 
 export interface SkillResult {
   skill_name: string;
@@ -70,65 +69,7 @@ export function BatchScanProvider({ children }: { children: ReactNode }) {
   const [scannedCount, setScannedCount] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const [logs, setLogs] = useState<string[]>([]);
-  const [restored, setRestored] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-
-  // ── Restore from sessionStorage on mount (browser refresh recovery) ──
-  useEffect(() => {
-    setRestored(true);
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      if (!saved?.batchId) return;
-      setBatchId(saved.batchId);
-      setResults(saved.results || []);
-      setSummary(saved.summary || null);
-      setScannedCount(saved.scannedCount || 0);
-      setTotalSkills(saved.totalSkills || 0);
-      setErrorMsg(saved.errorMsg || "");
-      setLogs(saved.logs || []);
-      // Refresh from server: if the batch already finished server-side, pull final summary.
-      // We do NOT reattempt the SSE stream — too brittle. UI shows the snapshot.
-      fetch(`${API_BASE}/api/batch/${saved.batchId}`)
-        .then((r) => r.json())
-        .then((data) => {
-          if (data && (data.status === "done" || (typeof data.scanned === "number" && data.scanned >= data.total_skills))) {
-            setSummary(data as BatchSummary);
-            setScannedCount(data.scanned);
-            setTotalSkills(data.total_skills);
-          }
-        })
-        .catch(() => {});
-    } catch {
-      // sessionStorage / JSON parse failure — ignore
-    }
-  }, []);
-
-  // ── Persist snapshot whenever core state changes ──
-  useEffect(() => {
-    if (!restored) return; // skip the very first render before restore completes
-    try {
-      if (!batchId) {
-        sessionStorage.removeItem(STORAGE_KEY);
-        return;
-      }
-      sessionStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          batchId,
-          results,
-          summary,
-          scannedCount,
-          totalSkills,
-          errorMsg,
-          logs: logs.slice(-200), // cap log size
-        })
-      );
-    } catch {
-      // quota / serialization failure — ignore
-    }
-  }, [restored, batchId, results, summary, scannedCount, totalSkills, errorMsg, logs]);
 
   const startScan = useCallback(
     async (p: StartParams) => {
@@ -245,17 +186,9 @@ export function BatchScanProvider({ children }: { children: ReactNode }) {
     setErrorMsg("");
     setLogs([]);
     setBatchId(null);
-    try {
-      sessionStorage.removeItem(STORAGE_KEY);
-    } catch {}
   }, []);
 
-  useEffect(
-    () => () => {
-      abortRef.current?.abort();
-    },
-    []
-  );
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   return (
     <BatchScanContext.Provider

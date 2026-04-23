@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { useI18n, LanguageToggle } from "@/lib/i18n";
+import { RemediationPanel } from "@/components/remediation-panel";
+import type { RemediationSuggestion } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_GUARDIAN_API || "http://localhost:8899";
 
@@ -16,6 +18,8 @@ interface ScanRecord {
   false_negative: boolean;
   scan_time?: string;
   source?: string;
+  source_en?: string;
+  remediations?: RemediationSuggestion[];
   stages: {
     static: {
       verdict: string; findings: number; severity: string;
@@ -90,8 +94,7 @@ function CircularProgress({ value, size = 80, strokeWidth = 6 }: { value: number
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (value / 100) * circumference;
-  const color = value >= 80 ? "text-red-500" : value >= 50 ? "text-amber-500" : "text-emerald-500";
-  // Invert: high confidence in threat = red; low = green
+  const color = value >= 70 ? "text-emerald-500" : value >= 30 ? "text-amber-500" : "text-red-500";
 
   return (
     <div className="relative inline-flex items-center justify-center">
@@ -133,6 +136,38 @@ export default function ScanDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // On-demand LLM fix suggestions (Medium Risk only)
+  const [remediations, setRemediations] = useState<RemediationSuggestion[] | null>(null);
+  const [remLoading, setRemLoading] = useState(false);
+  const [remError, setRemError] = useState("");
+
+  const generateRemediations = async () => {
+    setRemLoading(true);
+    setRemError("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/scan/${id}/remediate?lang=${isEn ? "en" : "zh"}`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        if (data.error === "no_runtime_evidence") {
+          setRemError(t("report.remediation.no_evidence"));
+        } else {
+          setRemError(data.message || data.reason || t("report.remediation.failed"));
+        }
+        setRemediations([]);
+      } else {
+        setRemediations(data.remediations || []);
+      }
+    } catch {
+      setRemError(t("report.remediation.failed"));
+      setRemediations([]);
+    } finally {
+      setRemLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetch(`${API_BASE}/api/scan/history?limit=200`)
       .then((res) => res.json())
@@ -141,6 +176,12 @@ export default function ScanDetailPage() {
         const found = list.find((r) => r.id === id);
         if (found) {
           setRecord(found);
+          // If the backend already cached LLM-generated security patches for this
+          // scan, surface them immediately — no extra round-trip, no LLM re-call.
+          const cached = found.remediations;
+          if (Array.isArray(cached) && cached.length > 0) {
+            setRemediations(cached);
+          }
         } else {
           setError(t("report.not_found"));
         }
@@ -265,7 +306,7 @@ export default function ScanDetailPage() {
                 {record.source && (
                   <>
                     <span className="text-stone-300">|</span>
-                    <span>{(isEn && (record as Record<string, unknown>).source_en as string) || record.source}</span>
+                    <span>{(isEn && record.source_en) || record.source}</span>
                   </>
                 )}
                 <span className="text-stone-300">|</span>
@@ -431,7 +472,7 @@ export default function ScanDetailPage() {
                 <div className={cn(
                   "card-white lg:rounded-none rounded-xl border p-5 h-full",
                   !confidenceAvailable ? "border-stone-300 bg-stone-50/50"
-                    : confidence >= 0.8 ? "border-red-200" : confidence >= 0.5 ? "border-amber-200" : "border-emerald-200"
+                    : confidence >= 0.7 ? "border-emerald-200" : confidence >= 0.3 ? "border-amber-200" : "border-red-200"
                 )}>
                   <div className="flex items-center gap-2 mb-3">
                     <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center",
@@ -451,7 +492,7 @@ export default function ScanDetailPage() {
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-stone-400">{t("report.stage.confidence")}</span>
                         <span className={cn("font-bold font-mono",
-                          confidence >= 0.8 ? "text-red-600" : confidence >= 0.5 ? "text-amber-600" : "text-emerald-600"
+                          confidence >= 0.7 ? "text-emerald-600" : confidence >= 0.3 ? "text-amber-600" : "text-red-600"
                         )}>{(confidence * 100).toFixed(0)}%</span>
                       </div>
                       <div className="flex items-center justify-between text-xs">
@@ -732,8 +773,60 @@ export default function ScanDetailPage() {
                   </div>
                 </div>
               )}
+
             </div>
           </div>
+
+          {/* ── Security Patch Suggestions (Medium Risk only, on-demand, full-width bottom section) ── */}
+          {record.verdict === "Medium Risk" && !record.false_negative && (
+            <div className="mt-12">
+              <h2 className="text-base font-bold text-stone-800 mb-4 flex items-center gap-2">
+                <svg className="w-5 h-5 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                {t("report.remediation.title")}
+              </h2>
+
+              {remediations === null && !remLoading && (
+                <div className="card-white rounded-xl border border-stone-200 p-6">
+                  <p className="text-xs text-stone-500 leading-relaxed mb-4">
+                    {t("report.remediation.cta_hint")}
+                  </p>
+                  <button
+                    onClick={generateRemediations}
+                    className="px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700 shadow-md shadow-violet-600/20 transition-all"
+                  >
+                    {t("report.remediation.generate")}
+                  </button>
+                </div>
+              )}
+
+              {remLoading && (
+                <div className="card-white rounded-xl border border-stone-200 p-6 flex items-center gap-3">
+                  <span className="w-4 h-4 border-2 border-stone-300 border-t-violet-500 rounded-full animate-spin inline-block" />
+                  <p className="text-xs text-stone-500">{t("report.remediation.loading")}</p>
+                </div>
+              )}
+
+              {remediations !== null && remediations.length > 0 && (
+                <RemediationPanel remediations={remediations} hideSkillName />
+              )}
+
+              {remediations !== null && remediations.length === 0 && !remLoading && (
+                <div className="card-white rounded-xl border border-stone-200 p-6 space-y-3">
+                  <p className="text-xs text-stone-500">
+                    {remError || t("report.remediation.empty")}
+                  </p>
+                  <button
+                    onClick={generateRemediations}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold border border-stone-300 text-stone-600 hover:bg-stone-50 transition-colors"
+                  >
+                    {t("report.remediation.retry")}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
         </div>
       </div>

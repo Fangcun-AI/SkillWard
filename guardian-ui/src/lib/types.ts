@@ -57,14 +57,18 @@ export interface LogLine {
   content: string;
 }
 
+/** Bilingual text returned by the LLM remediation endpoint.
+ *  Backwards-compat: legacy cached entries may be plain strings; UI handles both. */
+export type LocalizedText = string | { zh?: string; en?: string };
+
 export interface RemediationSuggestion {
   skill_name: string;
-  finding_title: string;
+  finding_title: LocalizedText;
   severity: Severity;
-  description: string;
+  description: LocalizedText;
   code_before: string;
   code_after: string;
-  explanation: string;
+  explanation: LocalizedText;
 }
 
 export type StageStatus = "pending" | "running" | "completed" | "error";
