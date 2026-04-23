@@ -247,6 +247,16 @@ SkillWard/
 
 ---
 
+## 📋 更新日志
+
+| 日期 | 概要 | 详情 |
+|------|------|------|
+| 2026-04-22 | 🛑 **界面升级 · 批量扫描可中途停止且不丢进度** — 首页、批量页、扫描详情页同步升级,上传面板支持「单文件」与「批量」一键切换;批量扫描进度会自动保存;后端新增扫描结果复用机制 —— 同一 skill 扫描过一次后再次提交会直接返回已有结果,免去重复跑流水线的等待,显著提升效率 | [docs/UPDATE_REPORT_2026-04-21_CN.md](docs/UPDATE_REPORT_2026-04-21_CN.md) |
+| 2026-04-14 | 🧠 **Stage B 提示词重写** — Stage B LLM 分诊提示词升级为 System+User 双段结构化英文提示(6 大风险维度 / 6 条 Legitimate Patterns / BLOCK·SANDBOX·PASS 三区锚点) | [docs/UPDATE_REPORT_2026-04-14_CN.md](docs/UPDATE_REPORT_2026-04-14_CN.md) |
+| 2026-04-10 | 🔒 **沙箱网关稳定性修复** — 启动脚本显式拉起 OpenClaw Gateway 守护进程并拆分 Phase 1 / Phase 2 双实例,修复 exec 审批失败 | [docs/UPDATE_REPORT_2026-04-10_CN.md](docs/UPDATE_REPORT_2026-04-10_CN.md) |
+
+---
+
 ## License
 
 [Apache License 2.0](LICENSE)

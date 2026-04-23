@@ -247,6 +247,16 @@ SkillWard/
 
 ---
 
+## 📋 Changelog
+
+| Date | Summary | Details |
+|------|---------|---------|
+| 2026-04-22 | 🛑 **UI refresh · Batch scan is abortable and survives refresh** — Home, batch, and scan-detail pages updated in step; upload panel toggles between single-file and batch submission; batch progress is persisted automatically; the backend adds a scan-result reuse mechanism — re-submitting a previously scanned skill returns the existing result directly, eliminating repeat pipeline latency and materially improving throughput | [docs/UPDATE_REPORT_2026-04-21.md](docs/UPDATE_REPORT_2026-04-21.md) |
+| 2026-04-14 | 🧠 **Stage B prompt redesign** — Stage B LLM triage prompt is rewritten as a structured English System + User two-part prompt (six risk dimensions / six Legitimate Patterns / BLOCK · SANDBOX · PASS anchor zones) | [docs/UPDATE_REPORT_2026-04-14.md](docs/UPDATE_REPORT_2026-04-14.md) |
+| 2026-04-10 | 🔒 **Sandbox gateway stability fix** — Bootstrap script explicitly starts the OpenClaw Gateway daemon and splits it into separate Phase 1 / Phase 2 instances, resolving the exec-approval failure | [docs/UPDATE_REPORT_2026-04-10.md](docs/UPDATE_REPORT_2026-04-10.md) |
+
+---
+
 ## License
 
 [Apache License 2.0](LICENSE)
