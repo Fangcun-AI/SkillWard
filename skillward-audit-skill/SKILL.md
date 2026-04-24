@@ -37,6 +37,15 @@ to the remote service, streams scan progress, and reports the verdict.
    Reply: "I can't fetch URLs directly for auditing. Please `git clone` the repo
    or download the release zip first, then point me at the local path."
 
+## Choosing language
+
+Inspect the user's most recent 2–3 messages. If any contain CJK (Chinese /
+Japanese / Korean) characters — Unicode range `U+4E00–U+9FFF` — pass
+`--lang zh`. Otherwise pass `--lang en`. Default to `en` when ambiguous.
+
+The report JSON always contains both `text` (Chinese) and `text_en` (English)
+in `warnings[]`; use whichever matches `--lang` when summarizing back to the
+user.
 
 ## Choosing scan depth
 
@@ -53,6 +62,44 @@ sandbox plus after-tool capability analysis — this typically takes 3–10 minu
 Starting now."
 
 ## How to invoke
+
+### ⚠️ Required — set the tool timeout explicitly in every call
+
+Do **not** rely on your exec / bash tool's default timeout. Defaults vary
+across harnesses and installations (Claude Code default is 120 s; OpenClaw
+default is 1800 s but some deployments override it down to 300 s or less).
+A too-short default will SIGKILL `scan.py` mid-scan, the SSE stream is cut
+before the server emits the final `report` event, and **nothing gets saved**.
+
+Pass the timeout explicitly on every invocation. Match the depth you're
+running:
+
+| Depth     | Claude Code (`timeout`, ms) | OpenClaw (`timeoutSec`, s) | Typical duration |
+| --------- | --------------------------- | -------------------------- | ---------------- |
+| `static`  | 60000                       | 60                         | 5–15 s           |
+| `sandbox` | 900000                      | 900                        | 60 s – 10 min    |
+| `deep`    | 1200000                     | 1200                       | 3 min – 15 min   |
+
+Concrete examples:
+
+- **Claude Code** — invoke the Bash tool with `timeout: 900000` (for
+  sandbox) or `timeout: 1200000` (for deep).
+- **OpenClaw** — invoke the `exec` tool with `timeoutSec: 900` (for
+  sandbox) or `timeoutSec: 1200` (for deep).
+- **Other harnesses** — pass the equivalent per-call timeout parameter;
+  the values above are the minimum that lets the server-side sandbox
+  finish.
+
+If your harness's exec/bash tool does **not** accept a per-call timeout
+override, and you cannot globally raise its default to at least 900 s,
+do **not** silently proceed with `--depth sandbox` / `--depth deep`.
+Fall back to `--depth static` and tell the user that the sandbox stage
+could not be run because the current tool harness would kill the scan
+before completion.
+
+While the scan runs, stdout stays empty until the final summary line; all
+heartbeat / progress output goes to stderr. Do not interpret "no stdout
+yet" as "stuck" — wait for the subprocess to exit.
 
 The scan script lives at `scripts/scan.py` inside this skill's own directory.
 Substitute `<skill_dir>` with the absolute path to the directory that contains
