@@ -251,6 +251,7 @@ SkillWard/
 
 | 日期 | 概要 | 详情 |
 |------|------|------|
+| 2026-04-24 | 🧰 **Skill 化** — 发布 `skillward-audit-skill`,Claude Code / OpenClaw agent 可在对话中直接对任意 skill 包(文件夹 / `.zip` / `.tar.gz`)发起 SkillWard 扫描 | [docs/UPDATE_REPORT_2026-04-24_CN.md](docs/UPDATE_REPORT_2026-04-24_CN.md) |
 | 2026-04-22 | 🛑 **UI更新** — 批量扫描进度会自动保存;新增扫描结果复用机制 | [docs/UPDATE_REPORT_2026-04-21_CN.md](docs/UPDATE_REPORT_2026-04-21_CN.md) |
 | 2026-04-14 | 🧠 **Stage B 提示词重写** — Stage B LLM 分诊提示词升级为 System+User 双段结构化提示| [docs/UPDATE_REPORT_2026-04-14_CN.md](docs/UPDATE_REPORT_2026-04-14_CN.md) |
 | 2026-04-10 | 🔒 **沙箱网关稳定性修复** — 修复 OpenClaw Gateway 进程不启动,修复 exec 审批失败 | [docs/UPDATE_REPORT_2026-04-10_CN.md](docs/UPDATE_REPORT_2026-04-10_CN.md) |
