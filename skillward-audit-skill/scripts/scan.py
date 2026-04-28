@@ -20,7 +20,11 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 DEFAULT_API_BASE = "https://skillward.fangcunleap.com"
-DEFAULT_TIMEOUT = 900
+DEFAULT_TIMEOUTS = {
+    "static": 60,
+    "sandbox": 900,
+    "deep": 1100,
+}
 
 EXIT_OK = 0
 EXIT_NO_REPORT = 2
@@ -29,7 +33,8 @@ EXIT_UNREACHABLE = 4
 EXIT_SERVER_ERROR = 5
 EXIT_TIMEOUT = 6
 
-SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", ".DS_Store"}
+SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv"}
+SKIP_FILES = {".DS_Store", "Thumbs.db"}
 SKIP_SUFFIX = {".pyc"}
 LARGE_FILE_WARN = 50 * 1024 * 1024
 
@@ -72,6 +77,8 @@ def build_zip_from_folder(folder: Path, quiet: bool = False) -> bytes:
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             rel_root = Path(root).relative_to(folder)
             for f in files:
+                if f in SKIP_FILES:
+                    continue
                 if Path(f).suffix in SKIP_SUFFIX:
                     continue
                 src = Path(root) / f
@@ -225,16 +232,32 @@ def main() -> int:
     p.add_argument("--depth", choices=list(DEPTH_FLAGS), default="sandbox")
     p.add_argument("--api-base",
                    default=os.environ.get("SKILLWARD_API_BASE", DEFAULT_API_BASE))
-    p.add_argument("--out", type=Path, default=Path("./skillward-report.json"))
-    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    p.add_argument("--out", type=Path, default=None,
+                   help="Report path. Default: <input_dir>/skillward-report.json "
+                        "(folders) or <archive>.skillward-report.json (archives).")
+    p.add_argument("--timeout", type=int, default=None,
+                   help="Total scan timeout in seconds. "
+                        "Default depends on --depth (static=60, sandbox=900, deep=1100).")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
+
+    args.input_path = args.input_path.expanduser()
+    if args.timeout is None:
+        args.timeout = DEFAULT_TIMEOUTS[args.depth]
 
     try:
         kind = detect_input(args.input_path)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return EXIT_NO_SKILL_MD
+
+    if args.out is None:
+        if kind == "folder":
+            args.out = args.input_path / "skillward-report.json"
+        else:
+            args.out = args.input_path.with_suffix(".skillward-report.json")
+    else:
+        args.out = args.out.expanduser()
 
     if kind == "folder":
         if not has_skill_md(args.input_path):

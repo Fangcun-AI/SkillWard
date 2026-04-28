@@ -1,6 +1,6 @@
 ---
 name: skillward-audit
-description: Security-audit an Anthropic/OpenClaw skill bundle by uploading it to the SkillWard public scanning service (static analysis + LLM review + Docker sandbox). Use when the user asks to audit, scan, review, or check the safety of a skill folder, SKILL.md bundle, or downloaded .zip/.tar.gz — especially before installing a third-party skill.
+description: Security-audit a third-party skill bundle (folder with SKILL.md, or .zip / .tar.gz archive) before installing it, using the SkillWard cloud scanner. Trigger on any natural safety question about an external skill — "is this skill safe?", "audit / scan / review this skill", "should I install this?", "trustworthy?", "any malware?", "is it sketchy?" — even when the user doesn't name SkillWard explicitly. Do NOT trigger when the user is authoring their own skill, asking for a code review of code they wrote, or pointing at a built-in / first-party skill.
 ---
 
 # SkillWard Audit
@@ -12,18 +12,38 @@ to the remote service, streams scan progress, and reports the verdict.
 
 ## When to use
 
-- User asks to "audit", "scan", "review", "check the safety of" a skill
-- User references a path to a folder containing `SKILL.md`, or a `.zip` /
-  `.tar.gz` / `.tgz` archive
-- User is about to install a third-party / downloaded skill and wants a
-  security check first
-- User mentions ClawHub, OpenClaw, Anthropic skill bundles in a safety context
+- **Explicit invocation** — user asks to "audit", "scan", "review", or "check
+  the safety of" a skill bundle.
+- **Natural safety question about an external skill** — even without the words
+  "audit" or "SkillWard", treat any of these as an invocation request when a
+  skill path / archive is in scope:
+  - "Is this skill safe?" / "Is it safe to install?"
+  - "Should I install this?" / "Should I trust this?"
+  - "Any malware / backdoors / suspicious behavior in here?"
+  - "Is this trustworthy?" / "Does this look sketchy?"
+  - "Anything I should know before I install this?"
+- **User references a skill bundle path** — a folder containing `SKILL.md`, or
+  a `.zip` / `.tar.gz` / `.tgz` archive — in a safety-adjacent context.
+- **Pre-install safety check** — user is about to install a third-party /
+  downloaded skill and wants a security pass first.
+- **Source mentioned** — user mentions ClawHub, OpenClaw, GitHub, or another
+  third-party source for a skill bundle in a safety context.
 
 ## When NOT to use
 
-- General malware scanning of arbitrary files (not skill-shaped) — decline
-- Scanning a regular codebase, Python package, or repo that isn't a skill bundle
-- Scanning Claude's own built-in skills (not third-party)
+- **The user is authoring their own skill** and asking for code review,
+  feedback, or "does this look right?" on something they just wrote in this
+  session. Do a normal code review instead — SkillWard is for vetting
+  *external* code the user did not write.
+- **The user just edited the skill in this session** — what they want is
+  review of their own changes, not a third-party scanner.
+- **Built-in / first-party skills** — Claude's own bundled skills don't need
+  third-party scanning.
+- **Non-skill inputs** — a regular codebase, Python package, generic repo,
+  or arbitrary file that isn't shaped like a skill bundle. Decline and
+  explain.
+- **General malware scanning** of arbitrary files — decline; this tool only
+  understands skill bundles.
 
 ## Gathering input
 
