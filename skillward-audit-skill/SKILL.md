@@ -167,9 +167,10 @@ When summarizing warnings, prefer items with `level` in `("critical", "warning")
 over `"info"`. For English output use `text_en` and `source_en`; for Chinese use
 `text` and `source`.
 
-Always tell the user where the full JSON report was saved (the `--out` path)
-so they can open it for details. If they ask a follow-up question about a
-specific finding, read the report file to answer precisely.
+Always tell the user where the full JSON report was saved — `scan.py` prints
+the path on its final stderr line (`[done] report saved to ...`) — so they
+can open it for details. If they ask a follow-up question about a specific
+finding, read the report file to answer precisely.
 
 ## Exit codes
 
@@ -185,18 +186,18 @@ specific finding, read the report file to answer precisely.
 ## Examples
 
 In each example, substitute `<skill_dir>` with the absolute path of the
-directory that contains this `SKILL.md`.
+directory that contains this `SKILL.md`. `--out` is omitted because
+`scan.py` defaults to placing the report alongside the input.
 
-**Example 1** — user: "Can you audit `~/Downloads/cool-skill/` before I
-install it?"
+**Example 1** — user: "Can you audit `/home/alice/Downloads/cool-skill/`
+before I install it?"
 
 Folder input, default sandbox depth:
 
 ```bash
 python <skill_dir>/scripts/scan.py \
-  "~/Downloads/cool-skill/" \
-  --lang en --depth sandbox \
-  --out "~/Downloads/cool-skill/skillward-report.json"
+  "/home/alice/Downloads/cool-skill/" \
+  --lang en --depth sandbox
 ```
 
 Summarize the verdict in English, surfacing the top 2–3 `warnings[].text_en`
@@ -210,11 +211,25 @@ Archive input:
 ```bash
 python <skill_dir>/scripts/scan.py \
   "/tmp/untrusted-skill.zip" \
-  --lang en --depth sandbox \
-  --out "/tmp/untrusted-skill.skillward-report.json"
+  --lang en --depth sandbox
 ```
 
-**Example 3** — user: "Do a deep audit on `C:/Users/alice/skills/my-skill/`
+**Example 3** — user: "Quick safety check on `./vendor-skill/`?"
+
+Quick / static signal — skip the sandbox stage to return in seconds:
+
+```bash
+python <skill_dir>/scripts/scan.py \
+  "./vendor-skill/" \
+  --lang en --depth static
+```
+
+Static depth runs static analysis + LLM review only (typically 5–15 s) and
+sets `stages.runtime.status` to `"SKIPPED"` in the report — that's expected
+for this depth, not an error. Real-world fast-path SAFE scans on the public
+service return in ~4–7 s.
+
+**Example 4** — user: "Do a deep audit on `C:/Users/alice/skills/my-skill/`
 before I install it."
 
 First warn the user: "Deep mode runs the sandbox plus after-tool capability
@@ -223,11 +238,19 @@ analysis — usually 3–10 minutes. Starting now." Then:
 ```bash
 python <skill_dir>/scripts/scan.py \
   "C:/Users/alice/skills/my-skill/" \
-  --lang en --depth deep \
-  --out "C:/Users/alice/skills/my-skill/skillward-report.json"
+  --lang en --depth deep
 ```
 
 Forward-slashes work on Windows and sidestep shell escaping of backslashes.
+
+**Example 5** — user: "Audit https://github.com/foo/cool-skill before I
+install."
+
+URL input — remote fetching is not supported. Do **not** run `scan.py`.
+Reply:
+
+> I can't fetch URLs directly for auditing. Please `git clone` the repo or
+> download the release zip first, then point me at the local path.
 
 ## Troubleshooting notes
 
