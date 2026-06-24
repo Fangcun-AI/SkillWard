@@ -17,19 +17,21 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import zipfile
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from config import get_settings, update_settings, reset_settings
 
@@ -1533,7 +1535,8 @@ async def _run_docker_sandbox(skill_path: str, settings, enable_after_tool: bool
 async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: bool = False,
                            enable_after_tool: bool = True, batch_id: str = None, lang: str = "en") -> dict:
     """Run a single skill scan (non-streaming) and return the report dict."""
-    settings = get_settings()
+    # settings = get_settings()
+    settings = get_settings(validate_required=(use_llm or use_runtime))
     _pipeline_start = time.time()
     _latency = {"total": 0, "static": 0, "llm": 0, "runtime": 0, "verify": 0}
 
@@ -1669,6 +1672,182 @@ async def _run_single_scan(skill_path: str, use_llm: bool = True, use_runtime: b
                            latency=_latency, batch_id=batch_id, lang=lang)
     return report
 
+# 为 Dify Plugin 新增
+class _RepositoryScanError(Exception):
+    def __init__(self, error: str, status_code: int, detail: str | None = None):
+        super().__init__(detail or error)
+        self.error = error
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _validate_repository_url(repository_url: str) -> bool:
+    parsed = urlparse(repository_url or "")
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _find_skill_dir(root: str | Path) -> Path | None:
+    root = Path(root)
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        if "SKILL.md" in filenames:
+            return Path(current_root)
+    return None
+
+
+def _ensure_extract_target_is_safe(destination: Path, member_name: str):
+    destination = destination.resolve()
+    target = (destination / member_name).resolve()
+    if os.path.commonpath([str(destination), str(target)]) != str(destination):
+        raise ValueError(f"Archive member escapes target directory: {member_name}")
+
+
+def _raise_if_archive_limits_exceeded(file_count: int, byte_count: int, max_files: int, max_uncompressed_bytes: int):
+    if file_count > max_files or byte_count > max_uncompressed_bytes:
+        raise _RepositoryScanError("repository_archive_too_large", 413)
+
+
+def _extract_repository_archive(
+    archive_path: Path,
+    destination: Path,
+    max_files: int = 1000,
+    max_uncompressed_bytes: int = 100 * 1024 * 1024,
+):
+    destination.mkdir(parents=True, exist_ok=True)
+    archive_name = archive_path.name.lower()
+    if archive_name.endswith(".zip"):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            file_count = 0
+            byte_count = 0
+            for member in zf.infolist():
+                _ensure_extract_target_is_safe(destination, member.filename)
+                file_count += 1
+                byte_count += member.file_size
+                _raise_if_archive_limits_exceeded(
+                    file_count, byte_count, max_files, max_uncompressed_bytes
+                )
+            zf.extractall(destination)
+        return
+
+    import tarfile
+    with tarfile.open(archive_path, "r:gz") as tf:
+        file_count = 0
+        byte_count = 0
+        for member in tf.getmembers():
+            _ensure_extract_target_is_safe(destination, member.name)
+            if member.issym() or member.islnk():
+                raise ValueError(f"Archive link member is not allowed: {member.name}")
+            file_count += 1
+            if member.isfile():
+                byte_count += member.size
+            _raise_if_archive_limits_exceeded(
+                file_count, byte_count, max_files, max_uncompressed_bytes
+            )
+        tf.extractall(destination)
+
+
+def _archive_filename_for_url(repository_url: str) -> str | None:
+    path = urlparse(repository_url).path.lower()
+    if path.endswith(".zip"):
+        return "repository.zip"
+    if path.endswith(".tar.gz"):
+        return "repository.tar.gz"
+    if path.endswith(".tgz"):
+        return "repository.tgz"
+    return None
+
+
+def _download_repository_archive(
+    repository_url: str,
+    archive_path: Path,
+    timeout: int = 60,
+    max_bytes: int = 50 * 1024 * 1024,
+):
+    import urllib.request
+
+    total = 0
+    try:
+        with urllib.request.urlopen(repository_url, timeout=timeout) as response:
+            with open(archive_path, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise _RepositoryScanError("repository_archive_too_large", 413)
+                    out.write(chunk)
+    except _RepositoryScanError:
+        archive_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        archive_path.unlink(missing_ok=True)
+        detail = str(exc).strip()
+        raise _RepositoryScanError("repository_download_failed", 400, detail[-1000:] or None)
+
+
+def _read_tail(path: Path, max_chars: int = 1000) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_chars * 4), os.SEEK_SET)
+            data = f.read()
+    except FileNotFoundError:
+        return ""
+    return data.decode(errors="replace")[-max_chars:].strip()
+
+
+def _clone_repository(repository_url: str, destination: Path, timeout: int = 60):
+    with tempfile.NamedTemporaryFile(mode="w+b") as stderr_file:
+        proc = subprocess.Popen(
+            ["git", "clone", "--depth", "1", repository_url, str(destination)],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            text=False,
+        )
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise _RepositoryScanError("repository_clone_timeout", 504)
+
+        if returncode != 0:
+            stderr_file.flush()
+            detail = _read_tail(Path(stderr_file.name), 1000)
+            raise _RepositoryScanError("repository_clone_failed", 400, detail or None)
+
+
+def _prepare_repository_skill(repository_url: str) -> tuple[str, str]:
+    tmp_root = Path(tempfile.mkdtemp(prefix="guardian_repo_"))
+    try:
+        archive_filename = _archive_filename_for_url(repository_url)
+        if archive_filename:
+            archive_path = tmp_root / archive_filename
+            _download_repository_archive(repository_url, archive_path)
+            search_root = tmp_root / "extracted"
+            _extract_repository_archive(archive_path, search_root)
+        else:
+            search_root = tmp_root / "repo"
+            _clone_repository(repository_url, search_root)
+
+        skill_dir = _find_skill_dir(search_root)
+        if not skill_dir:
+            raise _RepositoryScanError(
+                "skill_not_found",
+                400,
+                f"No directory containing SKILL.md was found under {search_root}.",
+            )
+        return str(skill_dir.resolve()), str(tmp_root)
+    except _RepositoryScanError:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise _RepositoryScanError("repository_clone_failed", 400, str(exc))
+
+########
 
 @app.get("/api/health")
 async def health():
@@ -1844,6 +2023,66 @@ async def list_providers():
          "defaults": {}},
     ]
 
+# 为 Dify Plugin 新增
+@app.post("/api/scan/run")
+async def scan_run(body: dict):
+    skill_path = body["skill_path"]
+    use_llm = body.get("use_llm", True)
+    use_runtime = body.get("use_runtime", True)
+    enable_after_tool = body.get("enable_after_tool", True)
+    lang = body.get("lang", "en")
+
+    p = Path(skill_path)
+    if not p.exists():
+        return JSONResponse({"error": f"Path not found: {skill_path}"}, status_code=404)
+    if not p.is_dir():
+        return JSONResponse({"error": "Path must be a directory"}, status_code=400)
+    if not (p / "SKILL.md").exists():
+        return JSONResponse({"error": "SKILL.md not found in skill_path"}, status_code=400)
+
+    return await _run_single_scan(
+        skill_path=skill_path,
+        use_llm=use_llm,
+        use_runtime=use_runtime,
+        enable_after_tool=enable_after_tool,
+        lang=lang,
+    )
+
+
+@app.post("/api/scan/repository")
+async def scan_repository(body: dict):
+    repository_url = body.get("repository_url", "")
+    if not _validate_repository_url(repository_url):
+        return JSONResponse({"error": "invalid_repository_url"}, status_code=400)
+
+    use_llm = body.get("use_llm", True)
+    use_runtime = body.get("use_runtime", True)
+    enable_after_tool = body.get("enable_after_tool", True)
+    lang = body.get("lang", "en")
+
+    cleanup_dir = None
+    try:
+        loop = asyncio.get_event_loop()
+        skill_path, cleanup_dir = await loop.run_in_executor(
+            None, _prepare_repository_skill, repository_url
+        )
+        return await _run_single_scan(
+            skill_path=skill_path,
+            use_llm=use_llm,
+            use_runtime=use_runtime,
+            enable_after_tool=enable_after_tool,
+            lang=lang,
+        )
+    except _RepositoryScanError as exc:
+        payload = {"error": exc.error}
+        if exc.detail:
+            payload["detail"] = exc.detail
+        return JSONResponse(payload, status_code=exc.status_code)
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+##########
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill Guardian SSE API")

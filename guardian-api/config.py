@@ -350,12 +350,22 @@ def _validate_required(s: GuardianSettings) -> None:
         )
 
 
-def get_settings() -> GuardianSettings:
-    """Singleton accessor — loads once, returns cached."""
+# def get_settings() -> GuardianSettings:
+#     """Singleton accessor — loads once, returns cached."""
+#     global _settings
+#     if _settings is None:
+#         _settings = load_settings()
+#         _validate_required(_settings)
+#     return _settings
+
+def get_settings(validate_required: bool = True):
     global _settings
     if _settings is None:
         _settings = load_settings()
+
+    if validate_required:
         _validate_required(_settings)
+
     return _settings
 
 
