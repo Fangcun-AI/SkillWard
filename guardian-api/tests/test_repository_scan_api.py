@@ -2,7 +2,9 @@ import tempfile
 import unittest
 import sys
 import zipfile
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 if not any((Path(p) / "fastapi").exists() for p in sys.path if p):
@@ -44,6 +46,11 @@ class RepositoryScanApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json(), {"error": "invalid_repository_url"})
+
+    def test_scan_run_endpoint_is_not_exposed(self):
+        paths = {getattr(route, "path", "") for route in guardian_api.app.routes}
+
+        self.assertNotIn("/api/scan/run", paths)
 
     def test_repository_scan_runs_prepared_skill_and_forwards_options(self):
         calls = {}
@@ -100,6 +107,128 @@ class RepositoryScanApiTests(unittest.TestCase):
                 "lang": "zh",
             },
         )
+
+    def test_repository_scan_allows_missing_api_key_while_auth_is_paused(self):
+        async def fake_run_single_scan(*args, **kwargs):
+            return {"report": "ok"}
+
+        with (
+            patch.object(
+                guardian_api,
+                "get_settings",
+                lambda validate_required=False: SimpleNamespace(api_secret_key="test-secret"),
+            ),
+            patch.object(
+                guardian_api,
+                "_prepare_repository_skill",
+                lambda repository_url: ("/tmp/prepared-skill", "/tmp/prepared-root"),
+            ),
+            patch.object(guardian_api, "_run_single_scan", fake_run_single_scan),
+        ):
+            response = self.client.post(
+                "/api/scan/repository",
+                json={"repository_url": "https://github.com/example/skill"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"report": "ok"})
+
+    def test_repository_scan_accepts_bearer_api_key_when_configured(self):
+        async def fake_run_single_scan(*args, **kwargs):
+            return {"report": "ok"}
+
+        with (
+            patch.object(
+                guardian_api,
+                "get_settings",
+                lambda validate_required=False: SimpleNamespace(api_secret_key="test-secret"),
+            ),
+            patch.object(
+                guardian_api,
+                "_prepare_repository_skill",
+                lambda repository_url: ("/tmp/prepared-skill", "/tmp/prepared-root"),
+            ),
+            patch.object(guardian_api, "_run_single_scan", fake_run_single_scan),
+            patch.object(guardian_api.shutil, "rmtree", lambda path, ignore_errors=False: None),
+        ):
+            response = self.client.post(
+                "/api/scan/repository",
+                headers={"Authorization": "Bearer test-secret"},
+                json={"repository_url": "https://github.com/example/skill"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"report": "ok"})
+
+    def test_archive_scan_runs_uploaded_skill_archive(self):
+        calls = {}
+
+        async def fake_run_single_scan(
+            skill_path,
+            use_llm=True,
+            use_runtime=False,
+            enable_after_tool=True,
+            batch_id=None,
+            lang="en",
+        ):
+            calls["scan"] = {
+                "skill_path": skill_path,
+                "use_llm": use_llm,
+                "use_runtime": use_runtime,
+                "enable_after_tool": enable_after_tool,
+                "lang": lang,
+            }
+            return {"report": "ok"}
+
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("demo-skill/SKILL.md", "---\nname: demo\n---\n")
+        archive.seek(0)
+
+        with patch.object(guardian_api, "_run_single_scan", fake_run_single_scan):
+            response = self.client.post(
+                "/api/scan/archive",
+                files={"file": ("demo-skill.zip", archive.getvalue(), "application/zip")},
+                data={
+                    "use_llm": "false",
+                    "use_runtime": "true",
+                    "enable_after_tool": "false",
+                    "lang": "zh",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"report": "ok"})
+        self.assertTrue(calls["scan"]["skill_path"].endswith("demo-skill"))
+        self.assertEqual(calls["scan"]["use_llm"], False)
+        self.assertEqual(calls["scan"]["use_runtime"], True)
+        self.assertEqual(calls["scan"]["enable_after_tool"], False)
+        self.assertEqual(calls["scan"]["lang"], "zh")
+
+    def test_archive_scan_allows_missing_api_key_while_auth_is_paused(self):
+        async def fake_run_single_scan(*args, **kwargs):
+            return {"report": "ok"}
+
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("demo-skill/SKILL.md", "---\nname: demo\n---\n")
+        archive.seek(0)
+
+        with (
+            patch.object(
+                guardian_api,
+                "get_settings",
+                lambda validate_required=False: SimpleNamespace(api_secret_key="test-secret"),
+            ),
+            patch.object(guardian_api, "_run_single_scan", fake_run_single_scan),
+        ):
+            response = self.client.post(
+                "/api/scan/archive",
+                files={"file": ("demo-skill.zip", archive.getvalue(), "application/zip")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"report": "ok"})
 
     def test_download_repository_archive_rejects_oversized_response(self):
         response = _ChunkedResponse([b"abc", b"def"])

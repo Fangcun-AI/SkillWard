@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Form, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -48,6 +49,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _configured_api_secret_key() -> str:
+    settings = get_settings(validate_required=False)
+    return (getattr(settings, "api_secret_key", "") or "").strip()
+
+
+def _provided_api_key(authorization: str | None, x_api_key: str | None) -> str:
+    if x_api_key and x_api_key.strip():
+        return x_api_key.strip()
+
+    value = (authorization or "").strip()
+    if not value:
+        return ""
+
+    scheme, _, token = value.partition(" ")
+    if scheme.lower() == "bearer":
+        return token.strip()
+    return value
+
+
+def _repository_auth_error(authorization: str | None, x_api_key: str | None):
+    configured_key = _configured_api_secret_key()
+    if not configured_key:
+        return None
+
+    provided_key = _provided_api_key(authorization, x_api_key)
+    if secrets.compare_digest(provided_key, configured_key):
+        return None
+
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
 def _sse_event(stage: int, event_type: str, text: str, data: dict | None = None):
@@ -1757,6 +1789,62 @@ def _archive_filename_for_url(repository_url: str) -> str | None:
     return None
 
 
+def _archive_filename_for_upload(filename: str | None) -> str | None:
+    name = (filename or "").lower()
+    if name.endswith(".zip"):
+        return "upload.zip"
+    if name.endswith(".tar.gz"):
+        return "upload.tar.gz"
+    if name.endswith(".tgz"):
+        return "upload.tgz"
+    return None
+
+
+async def _save_uploaded_archive(
+    upload: UploadFile,
+    archive_path: Path,
+    max_bytes: int = 50 * 1024 * 1024,
+):
+    total = 0
+    with open(archive_path, "wb") as out:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise _RepositoryScanError("repository_archive_too_large", 413)
+            out.write(chunk)
+
+
+async def _prepare_uploaded_skill_archive(upload: UploadFile) -> tuple[str, str]:
+    archive_filename = _archive_filename_for_upload(upload.filename)
+    if not archive_filename:
+        raise _RepositoryScanError("unsupported_archive_type", 400)
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="guardian_upload_archive_"))
+    try:
+        archive_path = tmp_root / archive_filename
+        await _save_uploaded_archive(upload, archive_path)
+        search_root = tmp_root / "extracted"
+        _extract_repository_archive(archive_path, search_root)
+
+        skill_dir = _find_skill_dir(search_root)
+        if not skill_dir:
+            raise _RepositoryScanError(
+                "skill_not_found",
+                400,
+                f"No directory containing SKILL.md was found under {search_root}.",
+            )
+        return str(skill_dir.resolve()), str(tmp_root)
+    except _RepositoryScanError:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise _RepositoryScanError("archive_scan_failed", 400, str(exc))
+
+
 def _download_repository_archive(
     repository_url: str,
     archive_path: Path,
@@ -2023,34 +2111,47 @@ async def list_providers():
          "defaults": {}},
     ]
 
-# 为 Dify Plugin 新增
-@app.post("/api/scan/run")
-async def scan_run(body: dict):
-    skill_path = body["skill_path"]
-    use_llm = body.get("use_llm", True)
-    use_runtime = body.get("use_runtime", True)
-    enable_after_tool = body.get("enable_after_tool", True)
-    lang = body.get("lang", "en")
-
-    p = Path(skill_path)
-    if not p.exists():
-        return JSONResponse({"error": f"Path not found: {skill_path}"}, status_code=404)
-    if not p.is_dir():
-        return JSONResponse({"error": "Path must be a directory"}, status_code=400)
-    if not (p / "SKILL.md").exists():
-        return JSONResponse({"error": "SKILL.md not found in skill_path"}, status_code=400)
-
-    return await _run_single_scan(
-        skill_path=skill_path,
-        use_llm=use_llm,
-        use_runtime=use_runtime,
-        enable_after_tool=enable_after_tool,
-        lang=lang,
-    )
+# The Dify Marketplace plugin uses /api/scan/repository and /api/scan/archive.
+# Keep this local-path endpoint disabled for hosted deployments because the path
+# would refer to the SkillWard server filesystem, not the user's computer.
+# @app.post("/api/scan/run")
+# async def scan_run(body: dict):
+#     skill_path = body["skill_path"]
+#     use_llm = body.get("use_llm", True)
+#     use_runtime = body.get("use_runtime", True)
+#     enable_after_tool = body.get("enable_after_tool", True)
+#     lang = body.get("lang", "en")
+#
+#     p = Path(skill_path)
+#     if not p.exists():
+#         return JSONResponse({"error": f"Path not found: {skill_path}"}, status_code=404)
+#     if not p.is_dir():
+#         return JSONResponse({"error": "Path must be a directory"}, status_code=400)
+#     if not (p / "SKILL.md").exists():
+#         return JSONResponse({"error": "SKILL.md not found in skill_path"}, status_code=400)
+#
+#     return await _run_single_scan(
+#         skill_path=skill_path,
+#         use_llm=use_llm,
+#         use_runtime=use_runtime,
+#         enable_after_tool=enable_after_tool,
+#         lang=lang,
+#     )
 
 
 @app.post("/api/scan/repository")
-async def scan_repository(body: dict):
+async def scan_repository(
+    body: dict,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+):
+    # Authentication is temporarily paused so Marketplace users can try the
+    # hosted SkillWard API without an issued API key. Keep the helper above for
+    # future re-enable, but do not enforce it here for now.
+    # auth_error = _repository_auth_error(authorization, x_api_key)
+    # if auth_error:
+    #     return auth_error
+
     repository_url = body.get("repository_url", "")
     if not _validate_repository_url(repository_url):
         return JSONResponse({"error": "invalid_repository_url"}, status_code=400)
@@ -2066,6 +2167,43 @@ async def scan_repository(body: dict):
         skill_path, cleanup_dir = await loop.run_in_executor(
             None, _prepare_repository_skill, repository_url
         )
+        return await _run_single_scan(
+            skill_path=skill_path,
+            use_llm=use_llm,
+            use_runtime=use_runtime,
+            enable_after_tool=enable_after_tool,
+            lang=lang,
+        )
+    except _RepositoryScanError as exc:
+        payload = {"error": exc.error}
+        if exc.detail:
+            payload["detail"] = exc.detail
+        return JSONResponse(payload, status_code=exc.status_code)
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+
+@app.post("/api/scan/archive")
+async def scan_archive(
+    file: UploadFile = File(...),
+    use_llm: bool = Form(True),
+    use_runtime: bool = Form(True),
+    enable_after_tool: bool = Form(True),
+    lang: str = Form("en"),
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+):
+    # Authentication is temporarily paused so Marketplace users can try the
+    # hosted SkillWard API without an issued API key. Keep the helper above for
+    # future re-enable, but do not enforce it here for now.
+    # auth_error = _repository_auth_error(authorization, x_api_key)
+    # if auth_error:
+    #     return auth_error
+
+    cleanup_dir = None
+    try:
+        skill_path, cleanup_dir = await _prepare_uploaded_skill_archive(file)
         return await _run_single_scan(
             skill_path=skill_path,
             use_llm=use_llm,

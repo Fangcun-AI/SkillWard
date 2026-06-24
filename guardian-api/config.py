@@ -56,10 +56,13 @@ class GuardianSettings:
     guard_plugin_api_url: str = ""   # Override container's FANGCUN_GUARD_API_URL
     guard_plugin_api_key: str = ""   # Replace hardcoded key in container plugin
 
+    # Public API authentication. Empty means authentication is disabled.
+    api_secret_key: str = ""
+
     def to_dict(self, mask_keys: bool = False) -> dict:
         d = asdict(self)
         if mask_keys:
-            for k in ("llm_api_key", "docker_api_key", "guard_plugin_api_key"):
+            for k in ("llm_api_key", "docker_api_key", "guard_plugin_api_key", "api_secret_key"):
                 v = d.get(k, "")
                 if v and len(v) > 4:
                     d[k] = _MASK_PREFIX + v[-4:]
@@ -189,6 +192,9 @@ _ENV_MAP = {
     "GUARDIAN_RETRY_DELAY": "retry_delay",
     "GUARDIAN_GUARD_PLUGIN_API_URL": "guard_plugin_api_url",
     "GUARDIAN_GUARD_PLUGIN_API_KEY": "guard_plugin_api_key",
+    "GUARDIAN_API_KEY": "api_secret_key",
+    "GUARDIAN_API_SECRET_KEY": "api_secret_key",
+    "API_SECRET_KEY": "api_secret_key",
 }
 
 
