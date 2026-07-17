@@ -29,7 +29,11 @@
 
 **SkillWard** 可以在 AI Agent Skills 发布或部署前进行安全审查，从而降低 Agent 使用的潜在风险。除了静态分析和 LLM 研判，它会将可疑 Skills 放入**隔离的 Docker 沙箱**中实际执行，用运行时证据替代不确定的告警。在 5,000 个真实 Skills 的评测中，约 **25%** 被判定为不安全；进入沙箱的约 **38%** 可疑样本中，约**三分之一**暴露了纯静态审查流程无法发现的运行时威胁。
 
-### SkillWard 如何应对这一挑战？
+## 🔥 最新动态
+
+- **2026-07-10** — 🚀🚀🚀 **SkillWard 已正式上架 Dify Marketplace！** 现在可以将 SkillWard 添加到 Dify 的 Workflow、Chatflow 或 Agent 中，直接扫描 AI Agent Skills 与 MCP 项目并获取结构化安全报告。[安装插件 →](https://marketplace.dify.ai/plugin/fangcunai/skillward)
+
+## SkillWard 如何应对这一挑战？
 
 我们在同一数据集上运行了两款已有的开源扫描工具作为参考基线（详见 [对比分析](docs/comparison_CN.md)），以下是三个真实案例：
 
@@ -251,6 +255,7 @@ SkillWard/
 
 | 日期 | 概要 | 详情 |
 |------|------|------|
+| 2026-07-17 | 🔌 **支持 MCP 检测** — 新增本地 MCP 源码、Git 仓库、软件包、压缩包及无认证远程 MCP Server 的安全检测，覆盖恶意意图识别与协议级探测 | [docs/UPDATE_REPORT_2026-07-17_CN.md](docs/UPDATE_REPORT_2026-07-17_CN.md) |
 | 2026-04-24 | 🧰 **Skill 化** — 发布 `skillward-audit-skill`,Claude Code / OpenClaw agent 可在对话中直接对任意 skill 包(文件夹 / `.zip` / `.tar.gz`)发起 SkillWard 扫描 | [docs/UPDATE_REPORT_2026-04-24_CN.md](docs/UPDATE_REPORT_2026-04-24_CN.md) |
 | 2026-04-22 | 🛑 **UI更新** — 批量扫描进度会自动保存;新增扫描结果复用机制 | [docs/UPDATE_REPORT_2026-04-21_CN.md](docs/UPDATE_REPORT_2026-04-21_CN.md) |
 | 2026-04-14 | 🧠 **Stage B 提示词重写** — Stage B LLM 分诊提示词升级为 System+User 双段结构化提示| [docs/UPDATE_REPORT_2026-04-14_CN.md](docs/UPDATE_REPORT_2026-04-14_CN.md) |

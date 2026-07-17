@@ -29,7 +29,11 @@
 
 **SkillWard** enables security review of AI Agent Skills before they are published or deployed, reducing the potential risks of Agent usage. Beyond static analysis and LLM evaluation, it executes suspicious Skills in **isolated Docker sandboxes**, replacing uncertain warnings with runtime evidence. Across 5,000 real-world Skills, ~**25%** were flagged as unsafe; among the ~**38%** suspicious samples that entered the sandbox, ~**one-third** revealed runtime threats that review-only pipelines could not catch.
 
-### How does SkillWard address this challenge?
+## 🔥 News
+
+- **2026-07-10** — 🚀🚀🚀 **SkillWard is now available on the Dify Marketplace!** Add SkillWard to a Dify Workflow, Chatflow, or Agent to scan AI Agent Skills and MCP projects and receive structured security reports. [Install the plugin →](https://marketplace.dify.ai/plugin/fangcunai/skillward)
+
+## How does SkillWard address this challenge?
 
 We ran two existing open-source scanning tools on the same dataset as reference baselines (see [Comparison](docs/comparison.md) for details). Here are three real-world cases:
 
@@ -251,6 +255,7 @@ SkillWard/
 
 | Date | Summary | Details |
 |------|---------|---------|
+| 2026-07-17 | 🔌 **MCP scanning support** — added security scanning for local MCP source, Git repositories, packages, archives, and unauthenticated remote MCP servers, with malicious-intent detection and protocol-level inspection | [docs/UPDATE_REPORT_2026-07-17.md](docs/UPDATE_REPORT_2026-07-17.md) |
 | 2026-04-24 | 🧰 **Skill release** — published `skillward-audit-skill`, a Claude Code / OpenClaw skill that lets agents audit any skill bundle (folder / `.zip` / `.tar.gz`) directly through the SkillWard service | [docs/UPDATE_REPORT_2026-04-24.md](docs/UPDATE_REPORT_2026-04-24.md) |
 | 2026-04-22 | 🛑 **UI refresh** — batch-scan progress is persisted automatically; added a scan-result reuse mechanism | [docs/UPDATE_REPORT_2026-04-21.md](docs/UPDATE_REPORT_2026-04-21.md) |
 | 2026-04-14 | 🧠 **Stage B prompt redesign** — Stage B LLM triage prompt upgraded to a structured System + User two-part prompt | [docs/UPDATE_REPORT_2026-04-14.md](docs/UPDATE_REPORT_2026-04-14.md) |
