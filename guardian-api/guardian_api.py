@@ -35,7 +35,10 @@ from config import get_settings, update_settings, reset_settings
 
 # Ensure guardian.py is importable
 SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+SKILL_SCANNER_PATH = ROOT_DIR / "skill-scanner"
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(SKILL_SCANNER_PATH))
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
 app = FastAPI(title="Skill Guardian API")
